@@ -17,7 +17,9 @@ DEFAULTS = {
     "character": "gpt",
     "scale": 0.72,            # 逻辑像素缩放；150% DPI 下约等于素材原始分辨率
     "voice_mode": "tts",      # tts | babble | mute
-    "sfx_volume": 0.55,
+    "voice_style": "flow",    # flow 整段连贯 | expressive 逐句起伏
+    "max_fps": 120,           # 渲染帧率上限；实际取 min(屏幕刷新率, 这个值)，用电池时减半
+    "sfx_volume": 0.3,
     "voice_volume": 0.9,
     "share_desktop_context": True,   # 把前台窗口标题等发给模型
     "proactive": True,               # 主动搭话（本地台词）
@@ -44,6 +46,8 @@ class Settings:
             self.d.update(json.loads(self.path.read_text(encoding="utf-8")))
         except Exception:
             pass
+        if self.d.get("sfx_volume") == 0.55:      # v0.1/0.2 的默认值偏吵，没改过的话降下来
+            self.d["sfx_volume"] = 0.3
 
     def __getitem__(self, k):
         return self.d.get(k, DEFAULTS.get(k))

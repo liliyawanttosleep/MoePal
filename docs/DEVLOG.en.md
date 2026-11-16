@@ -1,5 +1,24 @@
 ﻿# Dev log (English)
 
+## 2026-11-16 · v0.3 real high frame rate, continuous speech, character profiles, Claude model choice
+
+1. **Frame rate** — the user's display is 240 Hz; painting at 60 fps looked choppy. Now renders at
+   min(refresh, 120) using an integer divisor of the refresh rate (halved on battery). `Clip.pair()` + `Stage._mix()`
+   linearly blend adjacent 25 fps source frames so every refresh shows a new image (measured 120 distinct frames/s,
+   was ~25). Decoding moved to a background thread with 6-frame read-ahead; emoji particles are cached as images;
+   first frames are preloaded. Measured 1.1 ms mean / 1.7 ms p95 per frame (v0.2: 4.2 / 10.6, 23 with particles).
+2. **Speech** — per-clause synthesis with per-clause pitch (v0.2) sounded disjointed. New default `plan_flow`
+   sends the whole reply (split only at sentence ends beyond ~48 chars) at one pitch; candidate voices no longer
+   pitch-shift; cue sounds no longer overlap speech and are quieter. Added a local MeloTTS voice.
+3. **Profiles** — `tools/make_views.py` cuts transparent front/side/back views out of the turnaround sheets;
+   `ProfileWindow` shows the views, a fact table and a written backstory per character; the backstory is also part of
+   the persona prompt.
+4. **View-based actions** — turnaround, turn-away (used after being poked angry), side gaze. 57 actions.
+5. **Claude model menu** — Haiku / Sonnet / Opus / Fable, all four verified to answer.
+
+Not verified: how the voices sound (the developer agent cannot hear), on-screen look in a real window (the user was
+in a fullscreen game), microphone and real mouse gestures.
+
 ## 2026-11-16 · v0.2 smoothness, sharpness, UI, voice, one agent per character
 
 Feedback: choppy animation, blurry character edges, plain menu and windows, robotic voice; wire the dragon girl to

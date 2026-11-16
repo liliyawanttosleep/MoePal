@@ -90,6 +90,25 @@ def sheet(dark, tag):
             im2 = grab(sm, f"{tag}_submenu")
             canvas.alpha_composite(im2, (1500 - im2.width - 10, 60))
     canvas.save(out / f"sheet_{tag}_{cid}.png")
+    # 角色档案窗口 + 转身动作的三个瞬间
+    from moepal.config import ASSETS
+    pet.profwin.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+    pet.profwin.load(pet.char, pet.theme, ASSETS / pet.char.id)
+    pet.profwin.show()
+    app.processEvents()
+    grab(pet.profwin, f"{tag}_profile")
+    pet.profwin.hide()
+    strip = Image.new("RGBA", (1400, 460), bg)
+    x = 0
+    for tsec in (0.35, 1.1, 1.85, 2.6, 0.75):
+        pet.stage.set_action("turn")
+        import time as _t
+        for _ in range(int(tsec * 60)):
+            pet.stage.advance(1 / 60)
+        im = grab(pet, f"{tag}_turn")
+        strip.alpha_composite(im, (x, 0))
+        x += 270
+    strip.save(out / f"turn_{tag}_{cid}.png")
     print("sheet", tag, "dpr", k)
 
 

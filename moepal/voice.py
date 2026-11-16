@@ -44,6 +44,22 @@ def clean(text: str) -> str:
     return re.sub(r"[*_#`>]+", "", t).strip()
 
 
+def plan_flow(text, base_rate, base_pitch, valence=0.0, energy=0.0):
+    """连贯模式（默认）：整段话交给语音引擎一口气念，停顿和语调由引擎自己根据标点决定。
+    v0.2 把每个短句拆开单独合成、各给一个音高，听起来一顿一顿、忽高忽低；这里只在整句边界切，
+    并且全程同一个音高，只让语速随心情有很小的变化。短回复就是一次合成。"""
+    t = clean(text)
+    sents = [s.strip() for s in re.findall(r"[^。！？!?\n]+[。！？!?…~～]*|[。！？!?…]+", t) if s.strip()]
+    chunks = []
+    for s in sents:
+        if chunks and (len(chunks[-1]) + len(s) <= 48 or len(re.sub(r"\W", "", s)) < 2):
+            chunks[-1] += s
+        else:
+            chunks.append(s)
+    rate = int(max(-20, min(20, base_rate + energy * 4 + (-5 if valence < -0.35 else 0))))
+    return [Seg(c, rate, int(base_pitch), 0, 90, max(1, len(c))) for c in chunks]
+
+
 def plan(text, base_rate, base_pitch, valence=0.0, energy=0.0, seed=None):
     rng = random.Random(seed if seed is not None else hash(text))
     raw = [c.strip() for c in _CLAUSE.findall(clean(text)) if c.strip()]
@@ -109,6 +125,48 @@ def kokoro_available() -> bool:
     return (KOKORO_DIR / "model.onnx").exists()
 
 
+MELO_DIR = DATA / "models" / "vits-melo-tts-zh_en"
+_melo = None
+
+
+def melo_available() -> bool:
+    return (MELO_DIR / "model.onnx").exists()
+
+
+def engine_available(eng: str) -> bool:
+    return {"kokoro": kokoro_available, "melo": melo_available}.get(eng, lambda: True)()
+
+
+def _write_wav(audio, vol, path):
+    import numpy as np
+    pcm = (np.clip(np.asarray(audio.samples), -1, 1) * 32767 * (1 + vol / 100)).clip(-32767, 32767).astype("<i2")
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(audio.sample_rate)
+        w.writeframes(pcm.tobytes())
+
+
+def synth_melo(seg: Seg, path):
+    """本地 MeloTTS 中文女声（sherpa-onnx VITS），离线。"""
+    global _melo
+    import sherpa_onnx
+    with _kokoro_lock:
+        if _melo is None:
+            d = MELO_DIR
+            cfg = sherpa_onnx.OfflineTtsConfig(
+                model=sherpa_onnx.OfflineTtsModelConfig(
+                    vits=sherpa_onnx.OfflineTtsVitsModelConfig(
+                        model=str(d / "model.onnx"), lexicon=str(d / "lexicon.txt"), tokens=str(d / "tokens.txt"),
+                        dict_dir=str(d / "dict")),
+                    num_threads=4, provider="cpu"),
+                rule_fsts=",".join(str(d / x) for x in ("date.fst", "number.fst", "phone.fst") if (d / x).exists()),
+                max_num_sentences=2)
+            _melo = sherpa_onnx.OfflineTts(cfg)
+        audio = _melo.generate(seg.text, sid=0, speed=max(0.7, min(1.4, 1 + seg.rate / 100)))
+    _write_wav(audio, seg.vol, path)
+
+
 def synth_kokoro(seg: Seg, sid: int, path):
     global _kokoro
     import numpy as np
@@ -164,7 +222,8 @@ class Voice(QObject):
         self.stop()
         self.seq += 1
         n = self.seq
-        segs = plan(text[:420], voice_spec.get("rate", 0), voice_spec.get("pitch", 0), valence, energy)
+        planner = plan if self.s["voice_style"] == "expressive" else plan_flow
+        segs = planner(text[:420], voice_spec.get("rate", 0), voice_spec.get("pitch", 0), valence, energy)
         if not segs:
             QTimer.singleShot(0, lambda: self.failed.emit(n, "空文本"))
             return n
@@ -182,13 +241,17 @@ class Voice(QObject):
                               .encode("utf-8")).hexdigest()[:18]
             d = CACHE / "tts"
             d.mkdir(parents=True, exist_ok=True)
-            path = d / f"{key}.{'wav' if eng == 'kokoro' else 'mp3'}"
+            path = d / f"{key}.{'mp3' if eng == 'edge' else 'wav'}"
             for attempt in range(3):          # 在线服务并发时偶尔回空音频，重试即可
                 if path.exists() and path.stat().st_size >= 400:
                     break
                 try:
-                    (synth_kokoro(seg, int(spec.get("sid", 0)), path) if eng == "kokoro"
-                     else synth_edge(seg, spec["voice"], path))
+                    if eng == "kokoro":
+                        synth_kokoro(seg, int(spec.get("sid", 0)), path)
+                    elif eng == "melo":
+                        synth_melo(seg, path)
+                    else:
+                        synth_edge(seg, spec["voice"], path)
                 except Exception:
                     if attempt == 2 or n != self.seq:
                         raise

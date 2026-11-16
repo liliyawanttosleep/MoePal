@@ -9,13 +9,13 @@ from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QCursor, QPainter
 from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QWidget
 
-from .brain import BACKEND_ZH, quick_sentiment
+from .brain import BACKEND_ZH, CLAUDE_MODELS, quick_sentiment
 from .characters import CHARACTERS
-from .config import load_json, save_json
+from .config import ASSETS, load_json, save_json
 from .deskctx import DeskState
 from .stage import ACTIONS, EMO_ACTION, Stage
-from .widgets import (FLAGS, Bubble, HistoryWindow, InputBar, Theme, menu_header, screen_rect_at,
-                      style_menu)
+from .widgets import (FLAGS, Bubble, HistoryWindow, InputBar, ProfileWindow, Theme, menu_header,
+                      screen_rect_at, style_menu)
 
 EMO_SFX = {"happy": "happy", "love": "pet", "cheer": "cheer", "proud": "happy", "surprised": "surprise",
            "sad": "sad", "cry": "sad", "worried": "think", "angry": "angry", "sleepy": "sleep", "curious": "poke"}
@@ -92,6 +92,7 @@ class Pet(QWidget):
         self.inputbar.submitted.connect(self.on_user_text)
         self.inputbar.mic.connect(self.toggle_mic)
         self.histwin = HistoryWindow()
+        self.profwin = ProfileWindow()
         self._recolor()
 
         voice.seg_started.connect(self._tts_started)
@@ -111,7 +112,7 @@ class Pet(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self.timer.start(16)                # 60fps：程序化运动和粒子按显示器刷新率走
+        self._set_fps()
         self.desk_timer = QTimer(self)
         self.desk_timer.timeout.connect(self.desk_tick)
         self.desk_timer.start(4000)
@@ -124,6 +125,25 @@ class Pet(QWidget):
 
     def _resize(self):
         self.resize(int(Stage.W * self.scale), int(Stage.H * self.scale))
+
+    def _set_fps(self):
+        """渲染帧率跟屏幕走：240Hz 屏上按 60fps 画会明显发顿。取 min(刷新率, 上限)；用电池时减半省电。"""
+        scr = self.screen() or QApplication.primaryScreen()
+        hz = float(scr.refreshRate() or 60)
+        fps = min(hz, float(self.s["max_fps"] or 120))
+        if hz >= 2 * fps - 1:                      # 取刷新率的整数分之一，帧间隔才均匀
+            fps = hz / round(hz / fps)
+        if not self.desk.plugged:
+            fps = max(30.0, fps / 2)
+        self.fps = fps
+        self.timer.start(max(4, int(round(1000 / fps))))
+
+    def model_label(self):
+        if self.char.backends[0] == "claude_cli":
+            return dict(CLAUDE_MODELS).get(self.s["claude_model"], self.s["claude_model"]).split(" · ")[0]
+        if self.char.backends[0] == "codex_cli":
+            return self.s["codex_model"] or "Codex 默认模型"
+        return ""
 
     def _recolor(self):
         self.theme = Theme(self.char.color)
@@ -258,7 +278,7 @@ class Pet(QWidget):
             if now >= self.next_idle_var:
                 self.next_idle_var = now + self.rng.uniform(18, 42)
                 pool = ["hum", "read", "yawn", "float", "wave", "twirl", "special", "curious", "tiptoe",
-                        "sneeze", "shower", "dance"]
+                        "sneeze", "shower", "dance", "turn", "profile"]
                 if self.mood["e"] < -0.2:
                     pool += ["yawn", "yawn", "coffee"]
                 if self.mood["v"] > 0.4:
@@ -449,6 +469,7 @@ class Pet(QWidget):
             self.pokes.clear()
             self.shift_mood(dv=-.18, de=.1, da=-1)
             self.say(self.line("poke_angry"), "angry")
+            QTimer.singleShot(2300, lambda: self.act("back", 3.5) if not self.speaking else None)
             return
         self.shift_mood(de=.03, da=.2)
         self.act(self.rng.choice(["curious", "surprised", "happy", "twirl", "wave"]), 1.3, sfx="poke")
@@ -470,8 +491,8 @@ class Pet(QWidget):
             self.act(act)
         ev = sfx or (EMO_SFX.get(emo_key) if emo else None)
         mode = self.s["voice_mode"]
-        if ev:
-            self.sfx(ev, .45 if (voice and mode == "tts") else 1.0)
+        if ev and (sfx or not (voice and mode == "tts")):     # 开口说话时不叠提示音，免得听起来杂
+            self.sfx(ev)
         shown = text if len(text) <= 360 else text[:350] + "…（完整内容在“对话记录”里）"
         self._hold = hold
         self.bubble.below = False
@@ -793,7 +814,10 @@ class Pet(QWidget):
 
     def desk_tick(self):
         d = self.desk
+        was_plugged = d.plugged
         d.poll()
+        if d.plugged != was_plugged:
+            self._set_fps()
         now = time.time()
         # 前台是全屏程序（游戏、全屏视频）→ 整个人让开，不挡画面、不抢焦点、不出声；退出全屏再回来
         if d.full and self.isVisible() and not self.inputbar.isVisible() and not self.dragging:
@@ -877,11 +901,14 @@ class Pet(QWidget):
                 menu.addAction(a)
 
         m = style_menu(QMenu(), t)
-        menu_header(m, t, self.char.name, f"接入 {self.char.agent} · {self.mood_text().split('；')[0]}")
+        menu_header(m, t, self.char.name, f"{self.char.agent} · {self.model_label()} · {self.mood_text().split('，')[0]}")
         m.addAction("和我聊天        双击", self.open_chat)
         m.addAction("语音输入", self.toggle_mic)
         m.addAction("对话记录", self.show_history)
+        m.addAction("角色档案 · 背景故事", self.show_profile)
         m.addSeparator()
+        if self.char.backends[0] == "claude_cli":
+            radio(sub(m, "模型（Claude）"), CLAUDE_MODELS, self.s["claude_model"], self.pick_model)
         radio(sub(m, "切换角色"), [(c.id, f"{c.name}  ·  {c.agent}") for c in CHARACTERS.values()], self.char.id,
               self.set_char)
         am = sub(m, "动作表演")
@@ -890,7 +917,7 @@ class Pet(QWidget):
                   ("日常", ("hum", "read", "study", "focus", "coffee", "yawn", "sleep", "sneeze", "tiptoe", "wave",
                            "salute", "yes", "no", "idea", "curious", "think", "hungry", "night")),
                   ("表演", ("dance", "twirl", "backflip", "celebrate", "applaud", "moonwalk", "float", "special",
-                           "shower", "dizzy")))
+                           "shower", "dizzy", "turn", "back", "profile")))
         for title, names in groups:
             g = sub(am, title)
             for n in names:
@@ -900,8 +927,13 @@ class Pet(QWidget):
         radio(vm, (("tts", "开口说话"), ("babble", "咿呀语（离线）"), ("mute", "静音")), self.s["voice_mode"],
               lambda k: self.s.__setitem__("voice_mode", k))
         vm.addSeparator()
-        from .voice import kokoro_available
-        vs = [v for v in self.char.voices if v["engine"] != "kokoro" or kokoro_available()]
+        radio(vm, (("flow", "说话方式：连贯自然"), ("expressive", "说话方式：逐句起伏")), self.s["voice_style"],
+              lambda k: self.s.__setitem__("voice_style", k))
+        a = QAction("提示音（铃声 / 水泡等）", vm, checkable=True, checked=float(self.s["sfx_volume"]) > 0)
+        a.triggered.connect(lambda v: self.s.__setitem__("sfx_volume", 0.3 if v else 0.0))
+        vm.addAction(a)
+        from .voice import engine_available
+        vs = [v for v in self.char.voices if engine_available(v["engine"])]
         radio(sub(vm, "声线（点一下试听）"), [(v["id"], v["label"]) for v in vs], self.voice_spec()["id"], self.pick_voice)
         om = sub(m, "行为")
         for key, label in (("proactive", "主动搭话"), ("share_desktop_context", "把桌面状态告诉模型"),
@@ -924,6 +956,16 @@ class Pet(QWidget):
         m.addSeparator()
         m.addAction("退出", self.quit_requested.emit)
         return m
+
+    def pick_model(self, key):
+        self.s["claude_model"] = key
+        self.say(f"好，接下来用 {dict(CLAUDE_MODELS)[key].split(' · ')[0]} 来想事情。", "calm", voice=False)
+
+    def show_profile(self):
+        self.profwin.load(self.char, Theme(self.char.color), ASSETS / self.char.id)
+        self.profwin.show()
+        self.profwin.raise_()
+        self.act("turn")
 
     def pick_voice(self, vid):
         self.s["voice_" + self.char.id] = vid

@@ -399,6 +399,86 @@ class HistoryWindow(QWidget):
         sb.setValue(sb.maximum())
 
 
+class ProfileWindow(QWidget):
+    """角色档案：左边是可切换的视角图（正面 / 侧面 / 背面 / 立绘），右边是资料和背景故事。"""
+
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.Window)
+        self.resize(820, 600)
+        self.views = []
+        root = QHBoxLayout(self)
+        root.setContentsMargins(22, 22, 22, 22)
+        root.setSpacing(22)
+        left = QVBoxLayout()
+        left.setSpacing(10)
+        self.pic = QLabel()
+        self.pic.setFixedSize(330, 480)
+        self.pic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left.addWidget(self.pic)
+        self.tabs = QHBoxLayout()
+        self.tabs.setSpacing(6)
+        left.addLayout(self.tabs)
+        left.addStretch(1)
+        root.addLayout(left)
+        self.text = QTextBrowser()
+        self.text.setFrameShape(QTextBrowser.Shape.NoFrame)
+        root.addWidget(self.text, 1)
+
+    def load(self, char, t: Theme, asset_dir):
+        from PySide6.QtGui import QPixmap
+        self.t = t
+        bg = "#1f1c26" if t.dark else "#fbf9f6"
+        card = "rgba(255,255,255,12)" if t.dark else "rgba(0,0,0,8)"
+        self.setWindowTitle(f"角色档案 · {char.name}")
+        self.setStyleSheet(
+            f'QWidget{{background:{bg};color:{t.text.name()};font:10pt "{FONT}";}}'
+            f'QLabel{{background:{card};border-radius:16px;}}'
+            f'QPushButton{{background:{card};border:none;border-radius:13px;padding:5px 12px;color:{t.muted.name()};}}'
+            f'QPushButton:checked{{background:{t.rgba(t.accent, 90)};color:{t.text.name()};}}'
+            f'QTextBrowser{{background:transparent;}}'
+            f'QScrollBar:vertical{{width:6px;background:transparent;}}'
+            f'QScrollBar::handle:vertical{{background:{t.rgba(t.accent, 110)};border-radius:3px;}}'
+            f'QScrollBar::add-line,QScrollBar::sub-line{{height:0;}}')
+        while self.tabs.count():
+            w = self.tabs.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        self.views = []
+        for label, fn in (("正面", "view_front.png"), ("侧面", "view_side.png"), ("背面", "view_back.png"),
+                          ("立绘", "illust.webp")):
+            p = asset_dir / fn
+            if not p.exists():
+                continue
+            pm = QPixmap(str(p))
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, i=len(self.views): self.show_view(i))
+            self.tabs.addWidget(b)
+            self.views.append((b, pm))
+        self.tabs.addStretch(1)
+        if self.views:
+            self.show_view(0)
+        rows = "".join(f'<tr><td style="color:{t.muted.name()};padding:3px 14px 3px 0;white-space:nowrap;">{k}</td>'
+                       f'<td style="padding:3px 0;">{v}</td></tr>' for k, v in char.profile)
+        story = "".join(f'<p style="line-height:165%;margin:0 0 10px 0;">{p}</p>' for p in char.story.split("\n") if p.strip())
+        self.text.setHtml(
+            f'<p style="font-size:19pt;font-weight:600;color:{t.accent_text.name()};margin:0;">{char.name}</p>'
+            f'<p style="color:{t.muted.name()};margin:4px 0 14px 0;">{char.tagline}<br>在这台电脑上接入：{char.agent}</p>'
+            f'<table cellspacing="0">{rows}</table>'
+            f'<p style="font-weight:600;color:{t.accent_text.name()};margin:18px 0 8px 0;">背景故事</p>{story}')
+
+    def show_view(self, i):
+        for k, (b, pm) in enumerate(self.views):
+            b.setChecked(k == i)
+        pm = self.views[i][1]
+        dpr = self.devicePixelRatioF()
+        s = pm.scaled(int(310 * dpr), int(460 * dpr), Qt.AspectRatioMode.KeepAspectRatio,
+                      Qt.TransformationMode.SmoothTransformation)
+        s.setDevicePixelRatio(dpr)
+        self.pic.setPixmap(s)
+
+
 def screen_rect_at(pos: QPoint):
     scr = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
     return scr.availableGeometry()

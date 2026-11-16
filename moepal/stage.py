@@ -7,6 +7,7 @@ Stage = sprite clips + procedural motion + particles. Shared by the pet window a
 import math
 import random
 import threading
+
 from PIL import Image
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QRadialGradient
@@ -18,44 +19,89 @@ TAU = math.tau
 
 
 class Clip:
-    """一段动图的流式读取器：不把整段解码进内存，播到哪一帧解哪一帧。
-    这样可以用上全部 25fps 的帧（之前为省内存每 3 帧取 1，看起来卡），内存只占一两帧。
-    优先读超分后的 <clip>@2x.webp（576×832），没有就读原图。
+    """一段动图的流式读取器。
+    - 解码放在后台线程，提前解好接下来几帧；界面线程只取现成的帧，永远不等解码（之前偶尔卡一下就是在等它）。
+    - pair(pos) 返回相邻两帧和混合比例，由 Stage 在两帧之间做线性混合，
+      把 25fps 的素材补成和屏幕刷新率一样密的画面。素材本身已是光流补帧，相邻帧差别很小，混合不会出重影。
+    - 优先读超分后的 <clip>@2x.webp；.png 当作单帧（三视图立绘）。
     """
+    AHEAD = 6
 
     def __init__(self, path, px):
         self.im = Image.open(path)
-        self.px = px                                  # 素材像素 / 逻辑像素（@2x = 2）
         self.n = getattr(self.im, "n_frames", 1)
+        if str(path).lower().endswith(".png"):
+            px = self.im.height / 300.0               # 立绘缩到和序列帧里的人物一样高
+        self.px = px
         self.w, self.h = self.im.width / px, self.im.height / px
         self.frame_ms = float(self.im.info.get("duration", 40) or 40)
-        self.scale = 0.86 if self.h < 400 else 1.0    # v1 素材（360×360）人物偏大，归一身高
-        self.idx = -1
-        self.img = None
+        self.scale = 0.86 if (self.h < 400 and self.n > 1 and px == 1) else 1.0
+        self.blend = self.n > 12 and self.frame_ms <= 60      # v1 的 4 帧素材姿势差太大，不混合
+        self.lock = threading.Lock()
+        self.cache = {}
+        self.want = 0
+        self.wake = threading.Event()
+        self.thread = None
         first = self._decode(0)
-        a = self.im.convert("RGBA").getchannel("A").point(lambda v: 255 if v > 40 else 0)
-        bb = a.getbbox()
-        self.foot = (bb[3] if bb else self.im.height) / px
-        self.img = first
+        if self.n == 1:
+            self.foot = self.h
+        else:
+            bb = self.im.convert("RGBA").getchannel("A").point(lambda v: 255 if v > 40 else 0).getbbox()
+            self.foot = (bb[3] if bb else self.im.height) / px
+        self.cache[0] = first
+        self.last = first
 
     def _decode(self, i):
         self.im.seek(i)
         rgba = self.im.convert("RGBA")
         q = QImage(rgba.tobytes(), rgba.width, rgba.height, rgba.width * 4, QImage.Format.Format_RGBA8888)
-        self.idx = i
         return q.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
 
+    def _run(self):
+        while True:
+            self.wake.wait()
+            self.wake.clear()
+            while True:
+                want = self.want
+                need = [(want + k) % self.n for k in range(self.AHEAD)]
+                with self.lock:
+                    todo = next((x for x in need if x not in self.cache), None)
+                    for k in [k for k in self.cache if (k - want) % self.n > self.AHEAD + 1 and (want - k) % self.n > 2]:
+                        del self.cache[k]
+                if todo is None:
+                    break
+                try:
+                    img = self._decode(todo)
+                except Exception:
+                    break
+                with self.lock:
+                    self.cache[todo] = img
+
+    def pair(self, pos: float):
+        """pos 是带小数的帧位置。返回 (前一帧, 后一帧, 混合比例)。"""
+        if self.n == 1:
+            return self.last, self.last, 0.0
+        i = int(pos) % self.n
+        self.want = i
+        if self.thread is None:
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+        self.wake.set()
+        with self.lock:
+            a = self.cache.get(i)
+            b = self.cache.get((i + 1) % self.n)
+        if a is None:                      # 后台还没解到（刚切动作的头几毫秒）→ 先用上一张
+            return self.last, self.last, 0.0
+        self.last = a
+        if b is None or not self.blend:
+            return a, a, 0.0
+        return a, b, pos - int(pos)
+
     def frame(self, i) -> QImage:
-        i %= self.n
-        if i != self.idx:
-            try:
-                self.img = self._decode(i)
-            except Exception:
-                pass
-        return self.img
+        return self.pair(float(i))[0]
 
     @property
-    def frames(self):          # 兼容旧接口：只用来数帧数
+    def frames(self):
         return range(self.n)
 
 
@@ -66,6 +112,9 @@ class ClipBank:
         self.cache = {}
 
     def _path(self, key):
+        if key.startswith("view_"):
+            p = self.dir / f"{key}.png"
+            return (p, 1) if p.exists() else (None, 1)
         hi = self.dir / f"{key}@2x.webp"
         if hi.exists():
             return hi, 2
@@ -91,10 +140,13 @@ class ClipBank:
         return c
 
     def preload(self):
-        try:
-            self.get("idle")
-        except Exception:
-            pass
+        """启动时把每段动图的第一帧都准备好（约 0.3 秒），之后切动作不会顿一下。"""
+        for k in CLIPS + ["view_front", "view_side", "view_back"]:
+            try:
+                if self._path(k)[0]:
+                    self.get(k)
+            except Exception:
+                pass
 
 
 # ---------------- 程序化运动：t(秒) → (dx, dy, 旋转角, sx, sy) ----------------
@@ -198,6 +250,32 @@ def m_none(t):
     return 0, 0, 0, 1, 1
 
 
+TURN_STEP = 0.75        # 每个视角停留的秒数
+TURN_VIEWS = (("view_front", False), ("view_side", False), ("view_back", False), ("view_side", True),
+              ("view_front", False))
+
+
+def c_turn(t):          # 转身展示：正面 → 侧面 → 背面 → 另一侧 → 正面
+    return TURN_VIEWS[min(len(TURN_VIEWS) - 1, int(t / TURN_STEP))]
+
+
+def m_turn(t):          # 换视角的瞬间把身体横向压扁再展开，看起来像原地转了一下
+    ph = (t % TURN_STEP) / TURN_STEP
+    edge = min(ph, 1 - ph) * TURN_STEP          # 距离最近一次换视角的秒数
+    k = min(1.0, edge / 0.11)
+    if t < 0.11 * 0.5 or t > TURN_STEP * len(TURN_VIEWS) - 0.06:
+        k = 1.0
+    return 0, -4 * (1 - k), 0, 0.12 + 0.88 * _ease(k), 1
+
+
+def c_back(t):
+    return ("view_back", False)
+
+
+def c_side(t):
+    return ("view_side", False)
+
+
 def m_pulse(t):          # 心跳：咚咚、停
     ph = (t * 1.25) % 1
     k = 0.06 * (math.exp(-((ph - .08) / .05) ** 2) + .7 * math.exp(-((ph - .3) / .05) ** 2))
@@ -276,6 +354,10 @@ ACTIONS = {
     "peek":      ("idle", m_peek, None, None, None, "探头偷看"),
     "show":      ("wave", m_pop, "@happy", "burst", 1.6, "登场"),
     "hide":      ("wave", m_shrink, "💨", "ground", 0.5, "退场"),
+    # ---- v0.3 用三视图立绘做的动作 ----
+    "turn":      (c_turn, m_turn, "✨", "burst", TURN_STEP * 5, "转身展示"),
+    "back":      (c_back, m_breathe, "💭", "pop", 3.0, "背过身去"),
+    "profile":   (c_side, m_breathe, None, None, 3.0, "侧身远望"),
     # ---- v0.2 新增的创意动作 ----
     "idea":      ("idle", m_idea, "💡", "pop", 1.6, "灵光一闪"),
     "yes":       ("idle", m_yes, "⭕", "pop", 1.6, "用力点头"),
@@ -309,6 +391,39 @@ class Particle:
         self.ph = random.random() * TAU
 
 
+_GLYPHS = {}
+
+
+def glyph_image(g: str) -> QImage:
+    """把表情符号预先画成一张小图并缓存。直接 drawText 彩色 emoji 很慢（每帧几毫秒，首次上百毫秒），
+    粒子一多就掉帧；画缓存好的图片只要零点几毫秒。"""
+    img = _GLYPHS.get(g)
+    if img is None:
+        S = 96
+        img = QImage(S, S, QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(0)
+        p = QPainter(img)
+        f = QFont("Segoe UI Emoji")
+        f.setPixelSize(64)
+        p.setFont(f)
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(QRectF(0, 0, S, S), Qt.AlignmentFlag.AlignCenter, g)
+        p.end()
+        _GLYPHS[g] = img
+    return img
+
+
+def warm_glyphs(char=None):
+    for g in "✨💗💧💦💤💢❗❔💫💨🎵🎶⭐🎉💭❕💡👀☕📚👏☀️🔥🌙🍙💓⭕❌":
+        if g.strip() and g != "\ufe0f":
+            glyph_image(g)
+    glyph_image("🌧️")
+    glyph_image("☀️")
+    if char:
+        for g in char.particles.values():
+            glyph_image(g)
+
+
 class Stage:
     """逻辑画布：宽 W 高 H（素材像素坐标），角色脚底站在 (W/2, FLOOR)。"""
     W, H, FLOOR = 400, 500, 462
@@ -326,16 +441,18 @@ class Stage:
         self.extra_rot = 0.0     # 拖拽时的甩动
         self.rng = random.Random()
         self._burst_done = False
+        warm_glyphs(char)
 
     def set_char(self, char):
         self.char = char
         self.bank = ClipBank(char)
         self.particles.clear()
+        warm_glyphs(char)
 
     def set_action(self, name):
         if name not in ACTIONS:
             name = "idle"
-        same_clip = ACTIONS[name][0] == ACTIONS[self.action][0]
+        same_clip = ACTIONS[name][0] == ACTIONS[self.action][0] and isinstance(ACTIONS[name][0], str)
         self.action = name
         self.t = 0.0
         if not same_clip:
@@ -433,9 +550,40 @@ class Stage:
                 add(Particle(g, cx + 70, top + 40, 6, -22, 1.6, 26, "rise"))
 
     # ---------- 绘制 ----------
+    def _clip(self):
+        spec = ACTIONS[self.action][0]
+        flip = False
+        if callable(spec):                       # 随时间换素材的动作（转身展示）
+            spec, flip = spec(self.t)
+            try:
+                return self.bank.get(spec) if self.bank._path(spec)[0] else self.bank.get("idle"), flip
+            except Exception:
+                return self.bank.get("idle"), False
+        return self.bank.get(spec), flip
+
     def frame(self):
-        clip = self.bank.get(ACTIONS[self.action][0])
-        return clip, clip.frame(int(self.clip_t * 1000 / clip.frame_ms))
+        clip, _ = self._clip()
+        a, b, k = clip.pair(self.clip_t * 1000 / clip.frame_ms)
+        return clip, self._mix(a, b, k)
+
+    def _mix(self, a, b, k):
+        """两帧之间线性混合（预乘 alpha 下 A·(1-k) + B·k 是精确的）。"""
+        if b is a or k < 0.04:
+            return a
+        if k > 0.96:
+            return b
+        buf = getattr(self, "_buf", None)
+        if buf is None or buf.size() != a.size():
+            buf = self._buf = QImage(a.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        buf.fill(0)
+        q = QPainter(buf)
+        q.setOpacity(1 - k)
+        q.drawImage(0, 0, a)
+        q.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+        q.setOpacity(k)
+        q.drawImage(0, 0, b)
+        q.end()
+        return buf
 
     def paint(self, p: QPainter, scale=1.0, shadow=True):
         """把舞台画到 painter 上，画布左上角为原点，scale 为整体缩放。"""
@@ -444,6 +592,7 @@ class Stage:
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         clip, img = self.frame()
+        vflip = self._clip()[1]
         dx, dy, rot, sx, sy = ACTIONS[self.action][1](self.t)
         cx = self.W / 2
         if shadow:
@@ -463,11 +612,10 @@ class Stage:
         p.translate(cx + dx, self.FLOOR + dy)
         p.rotate(rot + self.lean + self.extra_rot)
         s = clip.scale
-        p.scale(sx * s * (-1 if self.flip else 1), sy * s)
+        p.scale(sx * s * (-1 if (self.flip != vflip) else 1), sy * s)
         p.drawImage(QRectF(-clip.w / 2, -clip.foot, clip.w, clip.h), img)
         p.restore()
         # 粒子
-        f = QFont("Segoe UI Emoji")
         for q in self.particles:
             k = q.age / q.life
             alpha = 1.0 if k < 0.6 else max(0.0, 1 - (k - 0.6) / 0.4)
@@ -484,11 +632,9 @@ class Stage:
             elif q.style == "cloud":
                 y += 4 * math.sin(q.age * 2.2)
                 alpha = min(1.0, q.age * 4) * (1.0 if k < 0.85 else max(0.0, 1 - (k - 0.85) / 0.15))
-            f.setPixelSize(max(6, int(size)))
-            p.setFont(f)
             p.setOpacity(alpha)
-            p.setPen(QColor(255, 255, 255))
-            p.drawText(QRectF(x - size, y - size, size * 2, size * 2), Qt.AlignmentFlag.AlignCenter, q.g)
+            d = size * 1.5                       # 缓存图 96px 里字形占 64px
+            p.drawImage(QRectF(x - d / 2, y - d / 2, d, d), glyph_image(q.g))
         p.setOpacity(1.0)
         p.restore()
 

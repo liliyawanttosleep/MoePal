@@ -25,6 +25,10 @@ BACKEND_ZH = {"claude_cli": "Claude Code", "codex_cli": "Codex",
               "deepseek_api": "DeepSeek API"}
 
 
+CLAUDE_MODELS = (("haiku", "Haiku 5.5 · 最快"), ("sonnet", "Sonnet 5.5 · 均衡"), ("opus", "Opus 5.5 · 更细腻"),
+                 ("fable", "Fable 5.2 · 最强，较慢、更耗额度"))
+
+
 class BackendError(Exception):
     pass
 
@@ -195,7 +199,9 @@ class Brain(QObject):
         n = self.seq
         mode = ("【模式】工作模式：你可以在工作文件夹里读写文件来帮用户完成任务，做完后用一两句话说明做了什么。"
                 if self.s["work_mode"] and self.s["work_dir"] else "【模式】聊天模式。")
-        system = char.persona.strip() + "\n" + COMMON_RULES + "\n" + mode
+        lore = ("\n【你的来历（这是你自己的经历，聊到时自然地提，不要整段背诵）】\n" + char.story + "\n"
+                + "；".join(f"{k}：{v}" for k, v in char.profile)) if char.story else ""
+        system = char.persona.strip() + lore + "\n" + COMMON_RULES + "\n" + mode
         threading.Thread(target=self._work, args=(n, char, system, prompt), daemon=True).start()
         return n
 
