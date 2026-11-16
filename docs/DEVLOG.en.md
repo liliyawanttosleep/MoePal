@@ -1,4 +1,4 @@
-# Dev log (English)
+﻿# Dev log (English)
 
 ## 2026-11-15 · v0.1 first build
 
@@ -42,5 +42,5 @@ Not verified / known issues:
 - **Real mouse gestures untested** — thresholds are estimates; the UI test drove the states directly.
 - **Look mod**: manifest and hooks validate; colour contrast and the backdrop need a visual check in the desktop app.
   It currently lives in one session's dev-mods folder.
-- DeepSeek API backend untested (no key). No exe build, no Release, not pushed to GitHub (asset licence is
-  attribution + non-commercial, see AGENTS.md).
+- DeepSeek API backend untested (no key). Code is public at GitHub liliyawanttosleep/MoePal (without ssets/ and the
+  mod backdrop). No exe build, no Release, no website entry: a usable build needs the art, which cannot be shipped.

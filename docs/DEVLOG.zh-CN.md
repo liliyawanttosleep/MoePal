@@ -1,4 +1,4 @@
-# 开发日志（中文）
+﻿# 开发日志（中文）
 
 ## 2026-11-15 · v0.1 首版
 
@@ -49,7 +49,7 @@
 - **主题 mod**：`claude plugin validate` 的清单与 hooks 检查通过；配色对比度（makeColors 的 problems）和背景图实际观感需要在桌面端看一眼。
   mod 目前放在当次会话的 dev-mods 目录，只对该会话生效。
 - DeepSeek API 后端未测（没有 key）。
-- 未打包 exe、未发布 Release、未推 GitHub（素材许可为署名+非商业，见 AGENTS.md）。
+- 代码已公开推到 GitHub liliyawanttosleep/MoePal（不含 ssets/ 和主题背景图）。未打包 exe、未发布 Release、未登记个人网站：成品离不开素材，而素材不能随包分发。
 
 ### 接下来可以做
 - 升级 Codex 后验证 GPT 后端；给 DeepSeek 补齐 10 个 v2 序列帧。
