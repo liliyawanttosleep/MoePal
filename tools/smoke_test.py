@@ -1,4 +1,4 @@
-"""冒烟测试：不开窗口，逐项检查能离线验证的部分。 Headless checks."""
+﻿"""冒烟测试：不开窗口，逐项检查能离线验证的部分。 Headless checks."""
 import sys
 import time
 from pathlib import Path
@@ -39,7 +39,7 @@ def t_clips():
     out = []
     for c in CHARACTERS.values():
         st = Stage(c)
-        frames = sum(len(st.bank.get(k).frames) for k in CLIPS)
+        frames = sum(st.bank.get(k).n for k in CLIPS)
         for a in ACTIONS:
             st.set_action(a)
             st.advance(0.3)
@@ -72,8 +72,8 @@ def t_backend(name):
                                 "心情不错，精神一般", {"task": "写回归分析作业"})
         from moepal.characters import COMMON_RULES
         raw = brain.CALLS[name](c.persona + COMMON_RULES + "\n【模式】聊天模式。", prompt, s)
-        emo, txt = brain.parse_reply(raw)
-        return f"[{emo}] {txt}"
+        emo, txt, thought = brain.parse_reply(raw)
+        return f"[{emo}] ({thought}) {txt}"
     return run
 
 

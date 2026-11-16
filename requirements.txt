@@ -5,3 +5,5 @@ edge-tts
 sounddevice
 faster-whisper
 psutil
+sherpa-onnx
+# 仅 tools/upscale_assets.py 需要： pip install torch --index-url https://download.pytorch.org/whl/cpu

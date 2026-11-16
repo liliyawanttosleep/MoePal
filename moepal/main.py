@@ -66,7 +66,9 @@ def main():
     audio = Audio(settings)
     listener = Listener(settings)
     brain = Brain(settings)
-    pet = Pet(settings, audio, listener, brain)
+    from .voice import Voice
+    voice = Voice(settings)
+    pet = Pet(settings, audio, listener, brain, voice)
 
     tray = QSystemTrayIcon(tray_icon(pet.char.id), app)
     tray.setToolTip("MoePal 萌伴 · Ctrl+Alt+M 召唤 / 对话 / 躲起来")

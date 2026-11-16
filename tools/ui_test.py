@@ -25,7 +25,8 @@ s.save = lambda: None                      # 测试不改用户设置
 if len(sys.argv) > 2:
     s.d["character"] = sys.argv[2]
 s.d["pos"] = None
-pet = Pet(s, Audio(s), Listener(s), Brain(s))
+from moepal.voice import Voice
+pet = Pet(s, Audio(s), Listener(s), Brain(s), Voice(s))
 pet.save_state = lambda: None
 pet.desk_timer.stop()                      # 测试期间不让“空闲→睡觉”打断
 t0 = time.time()
@@ -41,19 +42,28 @@ def shot(name):
         f"bubble={pet.bubble.full[:40]!r} mood={pet.mood_text()}")
 
 
-pet.brain.reply.connect(lambda n, emo, txt, b: log(f"REPLY via {b} [{emo}] {txt}"))
+pet.brain.reply.connect(lambda n, emo, txt, b, th: log(f"REPLY via {b} [{emo}] ({th}) {txt}"))
 pet.brain.failed.connect(lambda n, m: log(f"FAILED {m}"))
 pet.brain.notice.connect(lambda m: log(f"NOTICE {m}"))
-pet.audio.speech_started.connect(lambda n, d: log(f"TTS started {d:.1f}s"))
-pet.audio.speech_failed.connect(lambda n, m: log(f"TTS failed {m}"))
+pet.voice.seg_started.connect(lambda n, a, b, d: log(f"TTS seg {a:.2f}-{b:.2f} {d:.1f}s"))
+pet.voice.failed.connect(lambda n, m: log(f"TTS failed {m}"))
+
+
+def show_menu():
+    from PySide6.QtCore import QPoint
+    pet._menu = pet.build_menu()
+    pet._menu.popup(pet.pos() + QPoint(-250, 30))
 
 steps = [
     (2.5, lambda: shot("1_hello")),
     (5.5, pet.open_chat),
     (7.0, lambda: shot("2_ask_task")),
     (9.0, lambda: pet.on_user_text("唉，回归分析作业还有三道题没写，明天就要交了，好烦啊")),
-    (9.6, lambda: shot("3_thinking")),
-    (17.0, lambda: shot("4_reply")),
+    (10.2, lambda: shot("3_thinking")),
+    (21.0, lambda: shot("4_reply")),
+    (22.6, show_menu),
+    (23.4, lambda: shot("4b_menu")),
+    (23.6, lambda: pet._menu.close()),
     (24.0, lambda: (pet._end_say(), pet.act("dizzy", sfx="dizzy"))),
     (25.0, lambda: shot("5_dizzy")),
     (27.5, lambda: (setattr(pet, "petting", True), setattr(pet, "pet_last", time.time() + 2))),

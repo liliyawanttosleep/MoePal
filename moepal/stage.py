@@ -7,9 +7,7 @@ Stage = sprite clips + procedural motion + particles. Shared by the pet window a
 import math
 import random
 import threading
-from dataclasses import dataclass
-
-from PIL import Image, ImageSequence
+from PIL import Image
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QRadialGradient
 
@@ -19,70 +17,84 @@ CLIPS = ["jump", "wipe", "down", "anxious", "daze", "startle", "cry", "wave", "i
 TAU = math.tau
 
 
-@dataclass
 class Clip:
-    frames: list
-    frame_ms: float
-    w: int
-    h: int
-    foot: int          # 脚底所在的 y（素材像素）
-    scale: float       # 把不同批次素材归一到同一身高
+    """一段动图的流式读取器：不把整段解码进内存，播到哪一帧解哪一帧。
+    这样可以用上全部 25fps 的帧（之前为省内存每 3 帧取 1，看起来卡），内存只占一两帧。
+    优先读超分后的 <clip>@2x.webp（576×832），没有就读原图。
+    """
+
+    def __init__(self, path, px):
+        self.im = Image.open(path)
+        self.px = px                                  # 素材像素 / 逻辑像素（@2x = 2）
+        self.n = getattr(self.im, "n_frames", 1)
+        self.w, self.h = self.im.width / px, self.im.height / px
+        self.frame_ms = float(self.im.info.get("duration", 40) or 40)
+        self.scale = 0.86 if self.h < 400 else 1.0    # v1 素材（360×360）人物偏大，归一身高
+        self.idx = -1
+        self.img = None
+        first = self._decode(0)
+        a = self.im.convert("RGBA").getchannel("A").point(lambda v: 255 if v > 40 else 0)
+        bb = a.getbbox()
+        self.foot = (bb[3] if bb else self.im.height) / px
+        self.img = first
+
+    def _decode(self, i):
+        self.im.seek(i)
+        rgba = self.im.convert("RGBA")
+        q = QImage(rgba.tobytes(), rgba.width, rgba.height, rgba.width * 4, QImage.Format.Format_RGBA8888)
+        self.idx = i
+        return q.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+
+    def frame(self, i) -> QImage:
+        i %= self.n
+        if i != self.idx:
+            try:
+                self.img = self._decode(i)
+            except Exception:
+                pass
+        return self.img
+
+    @property
+    def frames(self):          # 兼容旧接口：只用来数帧数
+        return range(self.n)
 
 
 class ClipBank:
-    """按需解码 WebP 动图并缓存。96 帧的光流补帧动图每 3 帧取 1（≈8fps 关键节奏 + 平滑过渡）。"""
-
     def __init__(self, char):
         self.char = char
         self.dir = ASSETS / char.id
         self.cache = {}
-        self.lock = threading.Lock()
+
+    def _path(self, key):
+        hi = self.dir / f"{key}@2x.webp"
+        if hi.exists():
+            return hi, 2
+        lo = self.dir / f"{key}.webp"
+        return (lo, 1) if lo.exists() else (None, 1)
 
     def resolve(self, key):
-        if (self.dir / f"{key}.webp").exists():
+        if self._path(key)[0]:
             return key
         fb = self.char.fallback.get(key)
-        if fb and (self.dir / f"{fb}.webp").exists():
+        if fb and self._path(fb)[0]:
             return fb
         for k in ("idle", "anxious", "wave", "jump"):
-            if (self.dir / f"{k}.webp").exists():
+            if self._path(k)[0]:
                 return k
         raise FileNotFoundError(f"assets/{self.char.id} 里没有任何动图，请先运行 tools/import_assets.py")
 
     def get(self, key) -> Clip:
         key = self.resolve(key)
-        with self.lock:
-            if key in self.cache:
-                return self.cache[key]
-        im = Image.open(self.dir / f"{key}.webp")
-        n = getattr(im, "n_frames", 1)
-        step = 3 if n > 40 else (2 if n > 20 else 1)
-        frames, durs, foot = [], [], 0
-        for i, fr in enumerate(ImageSequence.Iterator(im)):
-            durs.append(fr.info.get("duration", 40) or 40)
-            if i % step:
-                continue
-            rgba = fr.convert("RGBA")
-            bb = rgba.getchannel("A").point(lambda a: 255 if a > 40 else 0).getbbox()
-            if bb:
-                foot = max(foot, bb[3])
-            q = QImage(rgba.tobytes(), rgba.width, rgba.height, rgba.width * 4, QImage.Format.Format_RGBA8888).copy()
-            frames.append(q.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied))
-        frame_ms = sum(durs) / max(1, len(frames))
-        w, h = im.size
-        clip = Clip(frames, frame_ms, w, h, foot or h, 0.86 if h < 400 else 1.0)
-        with self.lock:
-            self.cache[key] = clip
-        return clip
+        c = self.cache.get(key)
+        if c is None:
+            c = self.cache[key] = Clip(*self._path(key))
+        return c
 
     def preload(self):
-        def run():
-            for k in CLIPS:
-                try:
-                    self.get(k)
-                except Exception:
-                    pass
-        threading.Thread(target=run, daemon=True).start()
+        try:
+            self.get("idle")
+        except Exception:
+            pass
 
 
 # ---------------- 程序化运动：t(秒) → (dx, dy, 旋转角, sx, sy) ----------------
@@ -186,6 +198,43 @@ def m_none(t):
     return 0, 0, 0, 1, 1
 
 
+def m_pulse(t):          # 心跳：咚咚、停
+    ph = (t * 1.25) % 1
+    k = 0.06 * (math.exp(-((ph - .08) / .05) ** 2) + .7 * math.exp(-((ph - .3) / .05) ** 2))
+    return 0, 0, 0, 1 + k, 1 + k
+
+
+def m_no(t):             # 摇头
+    return 5 * math.sin(TAU * t * 2.2) * math.exp(-t * .9), 0, 4 * math.sin(TAU * t * 2.2) * math.exp(-t * .9), 1, 1
+
+
+def m_yes(t):            # 用力点头
+    k = math.sin(TAU * t * 2.0) ** 2 * math.exp(-t * .8)
+    return 0, 7 * k, 0, 1 + .03 * k, 1 - .05 * k
+
+
+def m_sneeze(t):         # 蓄力……阿嚏！
+    if t < .7:
+        k = _ease(t / .7)
+        return 0, 0, -6 * k, 1 - .04 * k, 1 + .07 * k
+    s = .2 * math.exp(-7 * (t - .7)) * math.cos(22 * (t - .7))
+    return 0, 0, 8 * math.exp(-6 * (t - .7)), 1 + s, 1 - s
+
+
+def m_idea(t):           # 灵光一闪：小跳一下定住
+    return 0, -26 * math.exp(-5 * t) * abs(math.sin(9 * t)), 0, 1, 1 + .05 * math.exp(-6 * t)
+
+
+def m_tiptoe(t):         # 踮脚张望
+    k = _ease(t / .4)
+    return 6 * math.sin(TAU * t / 1.8) * k, -9 * k, 3 * math.sin(TAU * t / 1.8) * k, 1 - .02 * k, 1 + .05 * k
+
+
+def m_dance(t):          # 左右踩点
+    b = t * 2.4
+    return 12 * math.sin(math.pi * b), -8 * abs(math.sin(math.pi * b * 2)), 6 * math.sin(math.pi * b), 1, 1
+
+
 # 动作表： name: (clip, motion, 粒子, 粒子样式, 默认时长秒(None=循环), 中文名)
 # 粒子写 "@happy" 之类表示取角色专属粒子。
 ACTIONS = {
@@ -227,6 +276,23 @@ ACTIONS = {
     "peek":      ("idle", m_peek, None, None, None, "探头偷看"),
     "show":      ("wave", m_pop, "@happy", "burst", 1.6, "登场"),
     "hide":      ("wave", m_shrink, "💨", "ground", 0.5, "退场"),
+    # ---- v0.2 新增的创意动作 ----
+    "idea":      ("idle", m_idea, "💡", "pop", 1.6, "灵光一闪"),
+    "yes":       ("idle", m_yes, "⭕", "pop", 1.6, "用力点头"),
+    "no":        ("anxious", m_no, "❌", "pop", 1.8, "摇头不行"),
+    "heartbeat": ("special", m_pulse, "💓", "rise", 3.0, "小鹿乱撞"),
+    "sneeze":    ("startle", m_sneeze, "💨", "pop", 1.6, "打喷嚏"),
+    "tiptoe":    ("idle", m_tiptoe, "👀", "pop", 2.6, "踮脚张望"),
+    "dance":     ("hum", m_dance, "🎶", "rise", 4.0, "踩点小舞"),
+    "coffee":    ("hum", m_breathe, "☕", "pop", 3.0, "喝杯咖啡"),
+    "study":     ("read", m_nod, "📚", "pop", 4.0, "陪你学习"),
+    "applaud":   ("jump", m_none, "👏", "rise", 2.2, "鼓掌叫好"),
+    "raincloud": ("down", m_droop, "🌧️", "cloud", 3.6, "头顶乌云"),
+    "sunshine":  ("wave", m_stretch, "☀️", "cloud", 3.0, "雨过天晴"),
+    "shower":    ("special", m_float, "@idle", "snow", 4.0, "专属飘落"),
+    "focus":     ("read", m_breathe, "🔥", "cloud", 4.0, "专注燃烧"),
+    "moonwalk":  ("hum", m_walk, "🕺", "pop", 2.4, "太空步"),
+    "salute":    ("wave", m_yes, "🫡", "pop", 1.8, "收到敬礼"),
 }
 
 EMO_ACTION = {"happy": "happy", "love": "love", "shy": "shy", "calm": "talk", "think": "think",
@@ -322,7 +388,25 @@ class Stage:
                 for i in range(3):
                     add(Particle(g, cx - 40 + i * 40, top + 30, 0, -18, 2.2, 20, "pop"))
             return
-        rate = {"rise": 2.6, "sweat": 2.2, "fall": 5.0, "zzz": 0.8, "think": 1.1, "orbit": 0.0}.get(style, 1.5)
+        if style == "cloud":                 # 悬在头顶的一个大图标
+            if not self._burst_done:
+                self._burst_done = True
+                add(Particle(g, cx, top + 4, 0, 0, (ACTIONS[self.action][4] or 3.0), 46, "cloud"))
+            if g.startswith("🌧"):
+                self.emit_acc += 7 * dt
+                while self.emit_acc >= 1:
+                    self.emit_acc -= 1
+                    add(Particle("💧", cx + r.uniform(-30, 30), top + 36, 0, 150, 0.55, 11, "drip"))
+            return
+        rate = {"rise": 2.6, "sweat": 2.2, "fall": 5.0, "zzz": 0.8, "think": 1.1, "orbit": 0.0,
+                "snow": 4.0}.get(style, 1.5)
+        if style == "snow":
+            self.emit_acc += rate * dt
+            while self.emit_acc >= 1:
+                self.emit_acc -= 1
+                add(Particle(g, cx + r.uniform(-150, 150), top - 40, r.uniform(-14, 14), r.uniform(60, 110),
+                             r.uniform(2.4, 3.4), r.uniform(15, 24), "rise"))
+            return
         if style == "orbit":
             if not self._burst_done:
                 self._burst_done = True
@@ -351,8 +435,7 @@ class Stage:
     # ---------- 绘制 ----------
     def frame(self):
         clip = self.bank.get(ACTIONS[self.action][0])
-        i = int(self.clip_t * 1000 / clip.frame_ms) % len(clip.frames)
-        return clip, clip.frames[i]
+        return clip, clip.frame(int(self.clip_t * 1000 / clip.frame_ms))
 
     def paint(self, p: QPainter, scale=1.0, shadow=True):
         """把舞台画到 painter 上，画布左上角为原点，scale 为整体缩放。"""
@@ -381,7 +464,7 @@ class Stage:
         p.rotate(rot + self.lean + self.extra_rot)
         s = clip.scale
         p.scale(sx * s * (-1 if self.flip else 1), sy * s)
-        p.drawImage(QPointF(-clip.w / 2, -clip.foot), img)
+        p.drawImage(QRectF(-clip.w / 2, -clip.foot, clip.w, clip.h), img)
         p.restore()
         # 粒子
         f = QFont("Segoe UI Emoji")
@@ -398,6 +481,9 @@ class Stage:
                 size *= 0.7 + k * 0.8
             elif q.style == "rise":
                 x += 6 * math.sin(q.age * 4 + q.ph)
+            elif q.style == "cloud":
+                y += 4 * math.sin(q.age * 2.2)
+                alpha = min(1.0, q.age * 4) * (1.0 if k < 0.85 else max(0.0, 1 - (k - 0.85) / 0.15))
             f.setPixelSize(max(6, int(size)))
             p.setFont(f)
             p.setOpacity(alpha)

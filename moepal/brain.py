@@ -1,4 +1,4 @@
-"""模型接入：Claude CLI / Codex CLI / DeepSeek(OpenAI 兼容) 三种后端，按角色的优先级依次尝试。
+﻿"""模型接入：Claude CLI / Codex CLI / DeepSeek(OpenAI 兼容) 三种后端，按角色的优先级依次尝试。
 LLM backends. Runs in worker threads; results come back as Qt signals.
 """
 import glob
@@ -21,7 +21,7 @@ from .config import DATA
 NO_WINDOW = 0x08000000
 EMOS = {"happy", "love", "shy", "calm", "think", "curious", "surprised", "worried", "sad", "cry", "angry",
         "sleepy", "proud", "cheer"}
-BACKEND_ZH = {"claude_cli": "Claude（本机 Claude Code 登录）", "codex_cli": "GPT（本机 Codex 登录）",
+BACKEND_ZH = {"claude_cli": "Claude Code", "codex_cli": "Codex",
               "deepseek_api": "DeepSeek API"}
 
 
@@ -40,6 +40,10 @@ def find_claude():
 
 
 def find_codex():
+    """优先用 Codex 桌面应用自带的 codex.exe（跟着应用自动更新）；PATH 里那个可能是很旧的独立安装。"""
+    found = glob.glob(os.path.expandvars(r"%LOCALAPPDATA%\OpenAI\Codex\bin\*\codex.exe"))
+    if found:
+        return max(found, key=os.path.getmtime)
     return shutil.which("codex") or shutil.which("codex.exe")
 
 
@@ -128,10 +132,15 @@ def parse_reply(raw: str):
     if m:
         emo = m.group(1).lower() if m.group(1).lower() in EMOS else "calm"
         txt = txt[m.end():]
-    txt = re.sub(r"\[emo[:：]\s*\w+\s*\]", "", txt)
+    thought = ""
+    m = re.search(r"\[think[:：]\s*([^\]\n]{1,40})\]\s*", txt)
+    if m:
+        thought = m.group(1).strip()
+        txt = txt[:m.start()] + txt[m.end():]
+    txt = re.sub(r"\[(emo|think)[:：][^\]\n]*\]", "", txt)
     txt = re.sub(r"^#+\s*", "", txt, flags=re.M)
     txt = txt.replace("**", "").strip()
-    return emo, txt
+    return emo, txt, thought
 
 
 NEG = ("累", "烦", "崩溃", "难受", "不想", "讨厌", "受不了", "焦虑", "压力", "失败", "挂了", "完蛋", "头疼", "头痛",
@@ -152,7 +161,7 @@ def quick_sentiment(text: str) -> int:
 
 
 class Brain(QObject):
-    reply = Signal(int, str, str, str)     # 请求号, 情绪, 正文, 后端
+    reply = Signal(int, str, str, str, str)   # 请求号, 情绪, 正文, 后端, 心里话
     failed = Signal(int, str)
     notice = Signal(str)                   # 后端降级提示（只提示一次）
 
@@ -199,13 +208,13 @@ class Brain(QObject):
                 continue
             try:
                 raw = CALLS[b](system, prompt, self.s)
-                emo, txt = parse_reply(raw)
+                emo, txt, thought = parse_reply(raw)
                 if not txt:
                     raise BackendError("空回复")
                 if errors and char.id not in self.noticed:
                     self.noticed.add(char.id)
                     self.notice.emit("；".join(errors) + f" → 暂时改用 {BACKEND_ZH[b]}")
-                self.reply.emit(n, emo, txt, b)
+                self.reply.emit(n, emo, txt, b, thought)
                 return
             except BackendError as e:
                 # 版本/配置类错误重试也没用 → 本次运行内不再试；其他错误 10 分钟后再试

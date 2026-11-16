@@ -1,4 +1,4 @@
-"""桌宠本体：窗口、情绪、鼠标互动、桌面反应、对话流程。 The pet itself."""
+﻿"""桌宠本体：窗口、情绪、鼠标互动、桌面反应、对话流程。 The pet itself."""
 import math
 import random
 import time
@@ -14,7 +14,8 @@ from .characters import CHARACTERS
 from .config import load_json, save_json
 from .deskctx import DeskState
 from .stage import ACTIONS, EMO_ACTION, Stage
-from .widgets import FLAGS, Bubble, HistoryWindow, InputBar, screen_rect_at
+from .widgets import (FLAGS, Bubble, HistoryWindow, InputBar, Theme, menu_header, screen_rect_at,
+                      style_menu)
 
 EMO_SFX = {"happy": "happy", "love": "pet", "cheer": "cheer", "proud": "happy", "surprised": "surprise",
            "sad": "sad", "cry": "sad", "worried": "think", "angry": "angry", "sleepy": "sleep", "curious": "poke"}
@@ -29,11 +30,11 @@ def clamp(x, a, b):
 class Pet(QWidget):
     quit_requested = Signal()
 
-    def __init__(self, settings, audio, listener, brain):
+    def __init__(self, settings, audio, listener, brain, voice):
         super().__init__(None, FLAGS | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.s, self.audio, self.listener, self.brain = settings, audio, listener, brain
+        self.s, self.audio, self.listener, self.brain, self.voice = settings, audio, listener, brain, voice
         self.char = CHARACTERS.get(self.s["character"], CHARACTERS["gpt"])
         self.stage = Stage(self.char)
         self.stage.bank.preload()
@@ -83,6 +84,7 @@ class Pet(QWidget):
         self.hide_timer = QTimer(self)
         self.hide_timer.setSingleShot(True)
         self.hide_timer.timeout.connect(self._end_say)
+        self.type_target = 0
 
         self.bubble = Bubble()
         self.bubble.clicked.connect(self._end_say)
@@ -92,9 +94,9 @@ class Pet(QWidget):
         self.histwin = HistoryWindow()
         self._recolor()
 
-        audio.speech_started.connect(self._tts_started)
-        audio.speech_done.connect(self._tts_finished)
-        audio.speech_failed.connect(self._tts_failed)
+        voice.seg_started.connect(self._tts_started)
+        voice.done.connect(self._tts_finished)
+        voice.failed.connect(self._tts_failed)
         listener.state.connect(self._mic_state)
         listener.level.connect(self._mic_level)
         listener.text.connect(self._mic_text)
@@ -108,7 +110,8 @@ class Pet(QWidget):
         self.last_tick = time.time()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
-        self.timer.start(33)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.timer.start(16)                # 60fps：程序化运动和粒子按显示器刷新率走
         self.desk_timer = QTimer(self)
         self.desk_timer.timeout.connect(self.desk_tick)
         self.desk_timer.start(4000)
@@ -123,8 +126,16 @@ class Pet(QWidget):
         self.resize(int(Stage.W * self.scale), int(Stage.H * self.scale))
 
     def _recolor(self):
-        self.bubble.set_color(self.char.color)
-        self.inputbar.set_color(self.char.color)
+        self.theme = Theme(self.char.color)
+        self.bubble.set_theme(self.theme, self.char.short)
+        self.inputbar.set_theme(self.theme)
+
+    def voice_spec(self):
+        vid = self.s["voice_" + self.char.id]
+        for v in self.char.voices:
+            if v["id"] == vid:
+                return v
+        return self.char.voices[0]
 
     def _place_initial(self):
         area = QApplication.primaryScreen().availableGeometry()
@@ -246,11 +257,16 @@ class Pet(QWidget):
                 and now >= self.oneshot_end):
             if now >= self.next_idle_var:
                 self.next_idle_var = now + self.rng.uniform(18, 42)
-                pool = ["hum", "read", "yawn", "float", "wave", "twirl", "special", "curious"]
+                pool = ["hum", "read", "yawn", "float", "wave", "twirl", "special", "curious", "tiptoe",
+                        "sneeze", "shower", "dance"]
                 if self.mood["e"] < -0.2:
-                    pool += ["yawn", "yawn"]
+                    pool += ["yawn", "yawn", "coffee"]
                 if self.mood["v"] > 0.4:
-                    pool += ["hum", "twirl"]
+                    pool += ["hum", "twirl", "dance", "heartbeat"]
+                if self.mood["v"] < -0.3:
+                    pool = ["raincloud", "raincloud", "yawn", "read"]
+                if self.desk.cat in ("code", "study") and self.desk.idle < 30:
+                    pool += ["study", "focus", "study"]
                 self.act(self.rng.choice(pool))
             elif (self.s["stroll"] and now >= self.next_stroll and not self.inputbar.isVisible()
                   and not self.hover and self.desk.idle < 120):
@@ -440,7 +456,7 @@ class Pet(QWidget):
             self.say(self.line("poke"), None, action=self.stage.action, voice=self.rng.random() < .6)
 
     # ------------------------------------------------------------ 说话
-    def say(self, text, emo="calm", action=None, voice=True, sfx=None, hold=None):
+    def say(self, text, emo="calm", action=None, voice=True, sfx=None, hold=None, thought=""):
         if not text:
             return
         self.say_id += 1
@@ -459,19 +475,21 @@ class Pet(QWidget):
         shown = text if len(text) <= 360 else text[:350] + "…（完整内容在“对话记录”里）"
         self._hold = hold
         self.bubble.below = False
-        self.bubble.layout_for(shown)
+        self.bubble.layout_for(shown, f"（{thought}）" if thought else "")
         self._place_bubble()
         self.bubble.reveal(0)
-        self.bubble.show()
+        self.bubble.fade_in()
         self.babble = False
         self.tts_done = True
         self.tts_req = 0
+        self.type_target = len(shown)
         if voice and mode == "tts":
             self.tts_done = False
-            self.tts_req = self.audio.speak(self.char, text[:320], self.mood["v"], self.mood["e"])
-            self.type_timer.start(95)          # 等语音合成时先慢慢出字
+            self.type_target = 0               # 字跟着声音走：哪一句开始念，哪一句才出字
+            self.tts_req = self.voice.speak(self.voice_spec(), text, self.mood["v"], self.mood["e"])
+            self.type_timer.start(60)
             sid = self.say_id
-            QTimer.singleShot(7000, lambda: self._tts_timeout(sid))
+            QTimer.singleShot(8000, lambda: self._tts_timeout(sid))
         elif voice and mode == "babble":
             self.babble = True
             self.type_timer.start(62)
@@ -479,14 +497,16 @@ class Pet(QWidget):
             self.type_timer.start(38)
 
     def _tts_timeout(self, sid):
-        if sid == self.say_id and not self.tts_done and not self.audio.playing:
+        if sid == self.say_id and not self.tts_done and self.type_target == 0:
             self._tts_failed(self.tts_req, "timeout")
 
-    def _tts_started(self, n, dur):
+    def _tts_started(self, n, a, b, dur):
         if n != self.tts_req:
             return
-        left = max(1, len(self.bubble.full) - self.bubble.shown)
-        self.type_timer.start(int(clamp(dur * 1000 * 0.92 / left, 25, 260)))
+        total = len(self.bubble.full)
+        self.type_target = total if b >= 0.999 else int(round(total * b))
+        left = max(1, self.type_target - self.bubble.shown)
+        self.type_timer.start(int(clamp(dur * 1000 * 0.9 / left, 18, 240)))
 
     def _tts_finished(self, n):
         if n == self.tts_req:
@@ -497,11 +517,15 @@ class Pet(QWidget):
         if n != self.tts_req or self.tts_done:
             return
         self.tts_done = True          # 合成失败（多半是断网）→ 改用角色的咿呀语
+        self.voice.stop()
+        self.type_target = len(self.bubble.full)
         self.babble = True
         self.type_timer.start(62)
         self._maybe_finish()
 
     def _type_step(self):
+        if self.bubble.shown >= self.type_target and self.bubble.shown < len(self.bubble.full):
+            return                                  # 等下一句的声音
         n = self.bubble.shown + 1
         self.bubble.reveal(n)
         if self.babble and n % 2 == 0 and n <= len(self.bubble.full):
@@ -521,8 +545,8 @@ class Pet(QWidget):
     def _end_say(self):
         self.type_timer.stop()
         self.hide_timer.stop()
-        self.bubble.hide()
-        self.audio.stop_speech()
+        self.bubble.fade_out()
+        self.voice.stop()
         self.tts_done = True
         self.speaking = False
 
@@ -532,10 +556,11 @@ class Pet(QWidget):
         area = screen_rect_at(body.center())
         x = body.center().x() - b.width() // 2
         y = body.top() - b.height() + int(18 * self.scale)
-        if y < area.top() + 4:                    # 上面放不下 → 放到脚下
+        y += 14                                   # 气泡自带阴影边距
+        if y < area.top() + 4 and not b.dots:     # 上面放不下 → 放到脚下
             b.below = True
-            b.layout_for(b.full)
-            y = body.bottom() + 4
+            b.layout_for(b.full, b.thought)
+            y = body.bottom() - 10
         x2 = int(clamp(x, area.left() + 4, area.right() - b.width() - 4))
         b.tail_x = clamp((body.center().x() - x2) / max(1, b.width()), .12, .88)
         b.move(x2, y)
@@ -552,9 +577,9 @@ class Pet(QWidget):
         area = screen_rect_at(body.center())
         x = int(clamp(body.center().x() - self.inputbar.width() // 2, area.left() + 4,
                       area.right() - self.inputbar.width() - 4))
-        y = body.bottom() + 2
-        if y + self.inputbar.height() > area.bottom():
-            y = area.bottom() - self.inputbar.height() - 2
+        y = body.bottom() - 10
+        if y + self.inputbar.height() > area.bottom() + 12:
+            y = area.bottom() - self.inputbar.height() + 12
         return QPoint(x, y)
 
     # ------------------------------------------------------------ 对话
@@ -603,9 +628,19 @@ class Pet(QWidget):
         desk = self.desk.describe() if self.s["share_desktop_context"] else ""
         prompt = self.brain.build_prompt(self.hist()[:-1], text, desk, self.mood_text(), self.memory)
         self.pending[self.brain.ask(self.char, prompt)] = "chat"
-        self.histwin.render(self.hist(), self.char) if self.histwin.isVisible() else None
+        self.histwin.render(self.hist(), self.char, self.theme) if self.histwin.isVisible() else None
+        self._show_dots()
 
-    def _on_reply(self, n, emo, text, backend):
+    def _show_dots(self):
+        """等模型回答时：头顶气泡里三个跳动的点。"""
+        self.hide_timer.stop()
+        self.type_timer.stop()
+        self.bubble.below = False
+        self.bubble.show_dots()
+        self._place_bubble()
+        self.bubble.fade_in()
+
+    def _on_reply(self, n, emo, text, backend, thought=""):
         kind = self.pending.pop(n, None)
         if kind is None:
             return
@@ -616,11 +651,14 @@ class Pet(QWidget):
             return                                   # 主动搭话赶上用户正忙 → 丢弃
         self.hist().append(["pet", text])
         dv, de = EMO_MOOD.get(emo, (0, 0))
+        was_low = self.mood["v"] < -0.3
         self.shift_mood(dv, de)
+        if was_low and self.mood["v"] >= -0.3:
+            QTimer.singleShot(6000, lambda: self.act("sunshine") if not self.speaking else None)
         self.oneshot_end = 0
-        self.say(text, emo)
+        self.say(text, emo, thought=thought)
         if self.histwin.isVisible():
-            self.histwin.render(self.hist(), self.char)
+            self.histwin.render(self.hist(), self.char, self.theme)
         self.save_state()
 
     def _on_fail(self, n, msg):
@@ -628,8 +666,8 @@ class Pet(QWidget):
         if kind != "chat":
             return
         self.busy = None
-        self.inputbar.set_status("连接失败：" + msg[:70])
         self.say(self.line("error"), "sad", voice=False)
+        self.inputbar.set_status("连接失败：" + msg[:70])
 
     # ------------------------------------------------------------ 语音输入
     def toggle_mic(self):
@@ -679,6 +717,10 @@ class Pet(QWidget):
 
     # ------------------------------------------------------------ 出现 / 躲起来 / 睡觉
     def first_hello(self):
+        self.desk.poll()
+        if self.desk.full:                 # 启动时用户正全屏（游戏等）→ 先不露面，等退出全屏再打招呼
+            QTimer.singleShot(5000, self.first_hello)
+            return
         self.show()
         self.act("show", sfx="show")
         h = datetime.now().hour
@@ -701,7 +743,7 @@ class Pet(QWidget):
     def hide_away(self):
         if self.mode == "peek":
             return
-        self.inputbar.hide()
+        self.inputbar.fade_out(120)
         self.home = self.pos()
         self.say(self.line("hide"), "calm", action="wave", sfx="hide", hold=1.2)
         QTimer.singleShot(1900, self._go_peek)
@@ -724,7 +766,7 @@ class Pet(QWidget):
 
     def vanish(self):
         self._end_say()
-        self.inputbar.hide()
+        self.inputbar.fade_out(120)
         if self.mode != "peek":
             self.home = self.pos()
         self.mode = "peek"
@@ -753,11 +795,23 @@ class Pet(QWidget):
         d = self.desk
         d.poll()
         now = time.time()
+        # 前台是全屏程序（游戏、全屏视频）→ 整个人让开，不挡画面、不抢焦点、不出声；退出全屏再回来
+        if d.full and self.isVisible() and not self.inputbar.isVisible() and not self.dragging:
+            self._end_say()
+            self.auto_hidden = True
+            self.hide()
+            return
+        if getattr(self, "auto_hidden", False):
+            if d.full:
+                return
+            self.auto_hidden = False
+            if self.mode != "peek" or self.x() < 10 ** 6:
+                self.show()
         if self.mode in ("normal", "walk") and d.idle > 240 and not self.busy and not self.speaking:
             self.mode, self.sleep_since = "sleep", now
             self.walk_target, self.stage.flip = None, False
             self.sfx("sleep", .6)
-            self.inputbar.hide()
+            self.inputbar.fade_out(120)
             return
         if self.mode == "sleep":
             if d.idle < 4:
@@ -807,51 +861,74 @@ class Pet(QWidget):
         QTimer.singleShot(800, lambda: self.say(self.line("greet"), "happy"))
 
     def build_menu(self) -> QMenu:
-        m = QMenu()
-        m.addAction("💬 对话（双击我）", self.open_chat)
-        m.addAction("🎤 语音输入", self.toggle_mic)
-        m.addAction("📜 对话记录", self.show_history)
+        t = self.theme = Theme(self.char.color)       # 每次打开都重新读系统深浅色
+        self.bubble.set_theme(t, self.char.short)
+        self.inputbar.set_theme(t)
+
+        def sub(parent, title):
+            return style_menu(parent.addMenu(title), t)
+
+        def radio(menu, items, current, setter):
+            g = QActionGroup(menu)
+            for key, label in items:
+                a = QAction(label, menu, checkable=True, checked=(key == current))
+                a.triggered.connect(lambda _=False, k=key: setter(k))
+                g.addAction(a)
+                menu.addAction(a)
+
+        m = style_menu(QMenu(), t)
+        menu_header(m, t, self.char.name, f"接入 {self.char.agent} · {self.mood_text().split('；')[0]}")
+        m.addAction("和我聊天        双击", self.open_chat)
+        m.addAction("语音输入", self.toggle_mic)
+        m.addAction("对话记录", self.show_history)
         m.addSeparator()
-        cm = m.addMenu("切换角色")
-        g = QActionGroup(cm)
-        for c in CHARACTERS.values():
-            a = QAction(c.name, cm, checkable=True, checked=c.id == self.char.id)
-            a.triggered.connect(lambda _=False, i=c.id: self.set_char(i))
-            g.addAction(a)
-            cm.addAction(a)
-        am = m.addMenu("动作表演")
-        for name, spec in ACTIONS.items():
-            if name in ("drag", "peek", "walk", "hide", "talk"):
-                continue
-            am.addAction(spec[5], lambda n=name: self.act(n, ACTIONS[n][4] or 3.0,
-                                                           sfx=EMO_SFX.get(n) or ("pet" if n == "pet" else None)))
-        vm = m.addMenu("声音")
-        g2 = QActionGroup(vm)
-        for key, label in (("tts", "真人语音（在线合成）"), ("babble", "咿呀语（离线）"), ("mute", "静音")):
-            a = QAction(label, vm, checkable=True, checked=self.s["voice_mode"] == key)
-            a.triggered.connect(lambda _=False, k=key: self.s.__setitem__("voice_mode", k))
-            g2.addAction(a)
-            vm.addAction(a)
-        om = m.addMenu("行为")
+        radio(sub(m, "切换角色"), [(c.id, f"{c.name}  ·  {c.agent}") for c in CHARACTERS.values()], self.char.id,
+              self.set_char)
+        am = sub(m, "动作表演")
+        groups = (("情绪", ("happy", "cheer", "love", "shy", "proud", "surprised", "worried", "sad", "wipe", "cry",
+                           "angry", "heartbeat", "raincloud", "sunshine")),
+                  ("日常", ("hum", "read", "study", "focus", "coffee", "yawn", "sleep", "sneeze", "tiptoe", "wave",
+                           "salute", "yes", "no", "idea", "curious", "think", "hungry", "night")),
+                  ("表演", ("dance", "twirl", "backflip", "celebrate", "applaud", "moonwalk", "float", "special",
+                           "shower", "dizzy")))
+        for title, names in groups:
+            g = sub(am, title)
+            for n in names:
+                g.addAction(ACTIONS[n][5], lambda n=n: self.act(n, ACTIONS[n][4] or 3.0,
+                                                                sfx=EMO_SFX.get(n) or ("pet" if n == "love" else None)))
+        vm = sub(m, "声音")
+        radio(vm, (("tts", "开口说话"), ("babble", "咿呀语（离线）"), ("mute", "静音")), self.s["voice_mode"],
+              lambda k: self.s.__setitem__("voice_mode", k))
+        vm.addSeparator()
+        from .voice import kokoro_available
+        vs = [v for v in self.char.voices if v["engine"] != "kokoro" or kokoro_available()]
+        radio(sub(vm, "声线（点一下试听）"), [(v["id"], v["label"]) for v in vs], self.voice_spec()["id"], self.pick_voice)
+        om = sub(m, "行为")
         for key, label in (("proactive", "主动搭话"), ("share_desktop_context", "把桌面状态告诉模型"),
                            ("stroll", "偶尔散步")):
             a = QAction(label, om, checkable=True, checked=bool(self.s[key]))
             a.triggered.connect(lambda v, k=key: self.s.__setitem__(k, bool(v)))
             om.addAction(a)
-        a = QAction("每 30 分钟用模型主动关心一次", om, checkable=True, checked=float(self.s["proactive_llm_minutes"]) > 0)
+        a = QAction("每 30 分钟主动关心一次（用模型）", om, checkable=True, checked=float(self.s["proactive_llm_minutes"]) > 0)
         a.triggered.connect(lambda v: self.s.__setitem__("proactive_llm_minutes", 30 if v else 0))
         om.addAction(a)
-        wm = m.addMenu("工作模式（可改文件）")
+        wm = sub(m, "工作模式")
         on = bool(self.s["work_mode"] and self.s["work_dir"])
-        wm.addAction(("✔ 已开启：" + self.s["work_dir"]) if on else "未开启").setEnabled(False)
+        wm.addAction(("已开启：" + self.s["work_dir"]) if on else "未开启（开启后可以改文件）").setEnabled(False)
         wm.addAction("选择工作文件夹并开启…", self.pick_work_dir)
-        wm.addAction("关闭工作模式", lambda: self.s.__setitem__("work_mode", False))
+        wm.addAction("关闭", lambda: self.s.__setitem__("work_mode", False))
         m.addSeparator()
-        m.addAction("🧹 忘记这段对话", self.forget)
-        m.addAction("🙈 躲到屏幕边", self.hide_away)
-        m.addAction("👻 完全隐藏（托盘或 Ctrl+Alt+M 召回）", self.vanish)
+        m.addAction("忘记这段对话", self.forget)
+        m.addAction("躲到屏幕边", self.hide_away)
+        m.addAction("完全隐藏        Ctrl+Alt+M 召回", self.vanish)
+        m.addSeparator()
         m.addAction("退出", self.quit_requested.emit)
         return m
+
+    def pick_voice(self, vid):
+        self.s["voice_" + self.char.id] = vid
+        self.s["voice_mode"] = "tts"
+        self.say(self.line("greet"), "happy")
 
     def contextMenuEvent(self, e):
         self._menu = self.build_menu()
@@ -865,7 +942,7 @@ class Pet(QWidget):
             self.say("工作模式开启啦，我可以改这个文件夹里的文件了。", "proud", voice=False)
 
     def show_history(self):
-        self.histwin.render(self.hist(), self.char)
+        self.histwin.render(self.hist(), self.char, self.theme)
         self.histwin.show()
         self.histwin.raise_()
 

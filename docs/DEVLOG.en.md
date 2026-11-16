@@ -1,5 +1,33 @@
 ﻿# Dev log (English)
 
+## 2026-11-16 · v0.2 smoothness, sharpness, UI, voice, one agent per character
+
+Feedback: choppy animation, blurry character edges, plain menu and windows, robotic voice; wire the dragon girl to
+Codex and the Claude character to Claude Code (DeepSeek not installed, skip).
+
+1. **Smoothness** — `stage.Clip` now stream-decodes (only the current frame in memory), so all 25 fps source frames
+   are used instead of every third; the window repaints at 60 fps. Measured 4.2 ms mean / 10.6 ms p95 per frame.
+2. **Sharpness** — `tools/upscale_assets.py` upscales every frame with Real-ESRGAN animevideov3 (CPU PyTorch):
+   colour-bled RGB and the alpha channel go through the network separately; output is stored as `<clip>@2x.webp`.
+3. **UI** — `widgets.py` rewritten: follows system light/dark, character accent colour, soft shadows, fades,
+   vector icons, typing dots while waiting, rounded translucent menu with a header naming the connected agent.
+4. **Voice** — new `voice.py`: replies are split into clauses with per-clause rate/pitch/volume and pauses,
+   synthesized in parallel, played in order, bubble text synced per clause. Global pitch shifting removed.
+   Voice candidates per character (4 online neural voices + 7 local Kokoro v1.1 voices via sherpa-onnx) can be
+   auditioned and chosen from the menu.
+5. **Agents** — dragon girl → Codex (uses the Codex desktop app's bundled CLI 0.167; the 0.140 on PATH is too old),
+   Claude character → Claude Code, no cross-fallback. DeepSeek character still answered by Claude, labelled as such.
+6. **Inner thought** — optional `[think:…]` line shown above the reply in the bubble, never spoken.
+7. **16 new actions** (54 total), incl. rain cloud when the mood is low and sunshine when it recovers.
+8. **Fullscreen courtesy** — the pet hides and stays silent while a fullscreen app is in the foreground.
+9. `tools/render_ui.py` renders the UI offscreen and silently for inspection.
+
+Verified: smoke test incl. real Codex and Claude replies, all 54 actions, @2x decoding; offscreen UI sheets inspected
+in both themes; per-clause speech observed in one live run.
+Not verified: how the voices actually sound (the developer agent cannot hear audio — audition them in the menu);
+real mouse gestures and microphone input; the new actions are not re-exported as GIFs; fullscreen detection on
+various games.
+
 ## 2026-11-15 · v0.1 first build
 
 ### Starting point
