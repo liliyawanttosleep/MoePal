@@ -1,0 +1,6 @@
+.venv/
+data/
+assets/
+__pycache__/
+*.pyc
+claude-mod/*/art/

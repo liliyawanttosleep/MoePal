@@ -1,0 +1,7 @@
+PySide6
+pillow
+numpy
+edge-tts
+sounddevice
+faster-whisper
+psutil
