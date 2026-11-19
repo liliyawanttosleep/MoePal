@@ -5,5 +5,7 @@ edge-tts
 sounddevice
 faster-whisper
 psutil
-sherpa-onnx
-# 仅 tools/upscale_assets.py 需要： pip install torch --index-url https://download.pytorch.org/whl/cpu
+# 显卡语音：CUDA 版 sherpa-onnx（也能跑 CPU）+ cuDNN；CUDA 12 运行库用系统已装的 CUDA Toolkit 12.x
+# pip install "sherpa-onnx==2.0.1+cuda12.cudnn9" -f https://k2-fsa.github.io/sherpa/onnx/cuda.html
+nvidia-cudnn-cu12
+# 仅 tools/upscale_assets.py / interp_assets.py 需要：pip install torch --index-url https://download.pytorch.org/whl/cpu

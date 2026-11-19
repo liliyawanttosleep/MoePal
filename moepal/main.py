@@ -89,6 +89,8 @@ def main():
     if not register_hotkey(settings["hotkey"]):
         tray.showMessage("MoePal", f"热键 {settings['hotkey']} 被占用，可以用托盘图标召唤。")
 
+    pet.warm_voice()
+
     def quit_():
         pet.save_state()
         settings.save()
@@ -98,6 +100,8 @@ def main():
 
     pet.quit_requested.connect(quit_)
     app.aboutToQuit.connect(pet.save_state)
+    from .voice import ZIPVOICE
+    app.aboutToQuit.connect(ZIPVOICE.close)
     return app.exec()
 
 

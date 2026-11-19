@@ -4,9 +4,12 @@ Stage = sprite clips + procedural motion + particles. Shared by the pet window a
 “组合动作”= 一段手绘/生成的序列帧（clip）× 一种程序化运动（motion）× 一种粒子（emit）。
 已有 12 段序列帧，这里组合出 30 多个动作，不需要新的美术帧。
 """
+import bisect
+import json
 import math
 import random
 import threading
+from pathlib import Path
 
 from PIL import Image
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -34,8 +37,32 @@ class Clip:
             px = self.im.height / 300.0               # 立绘缩到和序列帧里的人物一样高
         self.px = px
         self.w, self.h = self.im.width / px, self.im.height / px
-        self.frame_ms = float(self.im.info.get("duration", 40) or 40)
-        self.scale = 0.86 if (self.h < 400 and self.n > 1 and px == 1) else 1.0
+        # 时间轴：WebP 编码器会把完全相同的连续帧合并成一张“长帧”，所以每帧时长不一定相同。
+        # 补帧工具会写一个同名 .json 记下每帧时长；没有的话按第一帧的时长均匀处理。
+        durs = None
+        side = Path(str(path)).with_suffix(".json")
+        if side.exists():
+            try:
+                durs = json.loads(side.read_text(encoding="utf-8"))["durations"]
+                if len(durs) != self.n:
+                    durs = None
+            except Exception:
+                durs = None
+        if durs is None:
+            try:
+                self.im.seek(0)
+                self.im.load()
+                d0 = float(self.im.info.get("duration") or 40)
+            except Exception:
+                d0 = 40.0
+            durs = [d0] * self.n
+        self.starts = [0.0]
+        for d in durs[:-1]:
+            self.starts.append(self.starts[-1] + d)
+        self.durs = durs
+        self.total_ms = sum(durs) or 1.0
+        self.frame_ms = self.total_ms / max(1, self.n)
+        self.scale = 0.86 if (self.h < 400 and self.n > 1) else 1.0   # v1 素材（方形构图）人物偏大，归一身高
         self.blend = self.n > 12 and self.frame_ms <= 60      # v1 的 4 帧素材姿势差太大，不混合
         self.lock = threading.Lock()
         self.cache = {}
@@ -76,6 +103,17 @@ class Clip:
                     break
                 with self.lock:
                     self.cache[todo] = img
+
+    def at(self, ms: float):
+        """按时间（毫秒）取画面：返回 (当前帧, 下一帧, 混合比例)。长帧在最后一小段才开始往下一帧过渡。"""
+        if self.n == 1:
+            return self.last, self.last, 0.0
+        ms %= self.total_ms
+        i = bisect.bisect_right(self.starts, ms) - 1
+        into, d = ms - self.starts[i], self.durs[i]
+        base = 20.0                                  # 正常帧长；长帧只在末尾 base 毫秒内混合
+        frac = 0.0 if into < d - base else (into - (d - base)) / base
+        return self.pair(i + max(0.0, min(0.999, frac)))
 
     def pair(self, pos: float):
         """pos 是带小数的帧位置。返回 (前一帧, 后一帧, 混合比例)。"""
@@ -563,7 +601,7 @@ class Stage:
 
     def frame(self):
         clip, _ = self._clip()
-        a, b, k = clip.pair(self.clip_t * 1000 / clip.frame_ms)
+        a, b, k = clip.at(self.clip_t * 1000)
         return clip, self._mix(a, b, k)
 
     def _mix(self, a, b, k):

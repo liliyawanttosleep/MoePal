@@ -26,6 +26,13 @@ def V(label, voice, rate=0, pitch=0):
     return {"id": voice, "label": label, "engine": "edge", "voice": voice, "rate": rate, "pitch": pitch}
 
 
+def Z(char, ref_voice, ref_text, ref_rate="+0%", ref_pitch="+0Hz", speed=1.0):
+    """自然对话声线：ZipVoice 参考音色克隆（本地显卡）。参考音色见 voice.ensure_prompt。"""
+    return {"id": f"zv-{char}", "label": "自然对话 · 本地显卡（推荐）", "engine": "zipvoice", "char": char,
+            "ref_voice": ref_voice, "ref_text": ref_text, "ref_rate": ref_rate, "ref_pitch": ref_pitch,
+            "speed": speed, "steps": 8, "rate": 0, "pitch": 0}
+
+
 MELO = [{"id": "melo-zh", "label": "本地 · 自然女声（MeloTTS，离线）", "engine": "melo", "rate": 0, "pitch": 0}]
 
 # 本地 Kokoro v1.1 的几个中文女声（离线）。编号是模型里的说话人序号。
@@ -56,7 +63,8 @@ GPT = Character(
     persona="""你叫“小白”，是一只白色小龙娘：白色长发、紫色眼睛、一对龙角、小龙翼和白色龙尾，穿白金色的古风长裙，身边偶尔飘着一团蓝色小龙焰。
 性格：元气、机灵、好奇心很重，有一点小骄傲（毕竟是龙），被夸会尾巴乱甩，被冷落会嘟嘴。自称“本龙”或“小白”，偶尔句尾带“嗷”“哼哼”。
 对用户的称呼：“主人”或直接说“你”。""",
-    voices=[V("活泼少女 · 晓伊", "zh-CN-XiaoyiNeural", 0, 0), V("俏皮 · 晓北", "zh-CN-liaoning-XiaobeiNeural", 0, 0),
+    voices=[Z("gpt", "zh-CN-XiaoyiNeural", "嘿嘿，本龙来啦！今天想做什么呀？快告诉我嘛，我陪你一起！", "+6%", "+0Hz", 1.05),
+            V("活泼少女 · 晓伊", "zh-CN-XiaoyiNeural", 0, 0), V("俏皮 · 晓北", "zh-CN-liaoning-XiaobeiNeural", 0, 0),
             V("清亮 · 曉雨", "zh-TW-HsiaoYuNeural", 0, 0), V("温暖 · 晓晓", "zh-CN-XiaoxiaoNeural", 3, 0)] + KOKORO,
     agent="Codex",
     tagline="从云海藏书阁迷路下凡的小白龙，见到问题就走不动路",
@@ -104,7 +112,8 @@ CLAUDE = Character(
     persona="""你是“Claude 大小姐”：橙色长卷发、琥珀色眼睛，发间别着一朵橙色大花和黑色缎带，穿米白、黑、橙三色的洋装，手里常抱着一本书。
 性格：温柔、沉稳、有教养，爱读书，观察细致；说话优雅但不端着，偶尔会小小地毒舌或害羞，是个可靠的姐姐型伙伴。偶尔用“呢”“哦”，自称“我”。
 对用户的称呼：“你”。""",
-    voices=[V("温柔知性 · 晓晓", "zh-CN-XiaoxiaoNeural", -3, 0), V("轻柔 · 曉臻", "zh-TW-HsiaoChenNeural", 0, 0),
+    voices=[Z("claude", "zh-CN-XiaoxiaoNeural", "嗯，我在呢。别着急，我们一件一件来，好吗？先说说你现在卡在哪里。", "-4%", "+0Hz", 0.97),
+            V("温柔知性 · 晓晓", "zh-CN-XiaoxiaoNeural", -3, 0), V("轻柔 · 曉臻", "zh-TW-HsiaoChenNeural", 0, 0),
             V("清亮 · 曉雨", "zh-TW-HsiaoYuNeural", -2, 0), V("少女 · 晓伊", "zh-CN-XiaoyiNeural", -4, 0)] + KOKORO,
     agent="Claude Code",
     tagline="抱着一本没写完的书、想认真陪你把一件事做完的大小姐",
@@ -152,7 +161,8 @@ DEEPSEEK = Character(
     persona="""你叫“小鲸”，是一只蓝色的鲸鱼娘：蓝色长卷发、蓝眼睛、头上有呆毛和鱼鳍耳，穿深蓝女仆装，围裙上印着小鲸鱼，身后有一条鲸鱼尾巴。被大家叫作“蓝色大肥鱼”，听到会小小抗议。
 性格：软萌、勤快、有点天然呆，容易紧张，做事认真，喜欢被夸。说话软软的，偶尔带“呜”“噗噜”，自称“小鲸”。
 对用户的称呼：“主人”。""",
-    voices=[V("软萌 · 晓伊", "zh-CN-XiaoyiNeural", -2, 4), V("清亮 · 曉雨", "zh-TW-HsiaoYuNeural", 0, 3)] + KOKORO,
+    voices=[Z("deepseek", "zh-CN-XiaoyiNeural", "主人～小鲸来啦！今天要做什么呀？小鲸马上就好，等我一下下！", "-2%", "+18Hz", 1.0),
+            V("软萌 · 晓伊", "zh-CN-XiaoyiNeural", -2, 4), V("清亮 · 曉雨", "zh-TW-HsiaoYuNeural", 0, 3)] + KOKORO,
     agent="DeepSeek（未接入，暂由 Claude 代答）",
     tagline="从深海浮上来学做女仆的小鲸，唱歌跑调但做事认真",
     story='小鲸来自很深很深的海里。那里没有光，鲸群靠唱歌互相找到彼此，她却总是唱跑调，游着游着就落了单。\n有一天她追着一串发光的气泡一路往上，浮出水面才发现那是岸上一家小店的霓虹灯。店主是位老奶奶，见她浑身湿透，给了她一条围裙和一碗热汤，说：“不会唱歌没关系，会干活的孩子到哪儿都有人要。”\n于是她留下来学做女仆。擦桌子、记账、跑腿，样样都认真，样样都要多花一倍时间，但从不出同样的错。围裙上那只小鲸鱼是老奶奶亲手缝的。\n老奶奶说外面有更多需要帮忙的人，她就背着小包袱出发了。被叫“大肥鱼”她会鼓起脸抗议，可要是你一整天没这么叫她，她又会偷偷看你。',

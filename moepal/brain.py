@@ -25,8 +25,20 @@ BACKEND_ZH = {"claude_cli": "Claude Code", "codex_cli": "Codex",
               "deepseek_api": "DeepSeek API"}
 
 
-CLAUDE_MODELS = (("haiku", "Haiku 5.5 · 最快"), ("sonnet", "Sonnet 5.5 · 均衡"), ("opus", "Opus 5.5 · 更细腻"),
-                 ("fable", "Fable 5.2 · 最强，较慢、更耗额度"))
+# Claude Code 的模型别名永远指向该系列的最新版；空字符串 = 不传 --model，跟随 Claude Code 自己的默认设置。
+CLAUDE_MODELS = (("", "跟随 Claude Code 默认"), ("haiku", "Haiku · 最快"), ("sonnet", "Sonnet · 均衡"),
+                 ("opus", "Opus · 更细腻"), ("fable", "Fable · 最强，较慢、更耗额度"))
+
+
+def codex_models():
+    """Codex 应用缓存的可用模型列表（~/.codex/models_cache.json 里 visibility=list 的那些）。"""
+    try:
+        d = json.loads((Path.home() / ".codex" / "models_cache.json").read_text(encoding="utf-8"))
+        ms = [m for m in d.get("models", []) if m.get("visibility") == "list" and m.get("slug")]
+        ms.sort(key=lambda m: m.get("priority", 99))
+        return [(m["slug"], m.get("display_name") or m["slug"]) for m in ms]
+    except Exception:
+        return []
 
 
 class BackendError(Exception):
@@ -64,8 +76,10 @@ def call_claude(system, prompt, s):
     exe = find_claude()
     if not exe:
         raise BackendError("没找到 Claude Code 的 claude.exe")
-    args = [exe, "-p", "--model", s["claude_model"] or "haiku", "--output-format", "json",
+    args = [exe, "-p", "--output-format", "json",
             "--system-prompt", system, "--strict-mcp-config", "--no-session-persistence"]
+    if s["claude_model"]:
+        args += ["--model", s["claude_model"]]
     work = bool(s["work_mode"] and s["work_dir"] and os.path.isdir(s["work_dir"]))
     if work:   # 工作模式：允许在指定文件夹里读写文件（用户在菜单里手动开启）
         args += ["--permission-mode", "acceptEdits"]

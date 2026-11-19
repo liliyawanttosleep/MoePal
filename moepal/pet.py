@@ -9,7 +9,7 @@ from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QCursor, QPainter
 from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QWidget
 
-from .brain import BACKEND_ZH, CLAUDE_MODELS, quick_sentiment
+from .brain import BACKEND_ZH, CLAUDE_MODELS, codex_models, quick_sentiment
 from .characters import CHARACTERS
 from .config import ASSETS, load_json, save_json
 from .deskctx import DeskState
@@ -142,7 +142,7 @@ class Pet(QWidget):
         if self.char.backends[0] == "claude_cli":
             return dict(CLAUDE_MODELS).get(self.s["claude_model"], self.s["claude_model"]).split(" · ")[0]
         if self.char.backends[0] == "codex_cli":
-            return self.s["codex_model"] or "Codex 默认模型"
+            return dict(codex_models()).get(self.s["codex_model"], self.s["codex_model"]) or "跟随 Codex 默认"
         return ""
 
     def _recolor(self):
@@ -151,11 +151,20 @@ class Pet(QWidget):
         self.inputbar.set_theme(self.theme)
 
     def voice_spec(self):
+        from .voice import engine_available
+        ok = [v for v in self.char.voices if engine_available(v["engine"])] or self.char.voices
         vid = self.s["voice_" + self.char.id]
-        for v in self.char.voices:
+        for v in ok:
             if v["id"] == vid:
                 return v
-        return self.char.voices[0]
+        return ok[0]
+
+    def warm_voice(self):
+        """用自然对话声线时，后台先把语音进程和参考音色准备好，第一次开口不用等。"""
+        from .voice import ZIPVOICE
+        v = self.voice_spec()
+        if v["engine"] == "zipvoice" and self.s["voice_mode"] == "tts":
+            ZIPVOICE.warm(self.char.id, v)
 
     def _place_initial(self):
         area = QApplication.primaryScreen().availableGeometry()
@@ -880,6 +889,7 @@ class Pet(QWidget):
         self.stage.set_char(self.char)
         self.stage.bank.preload()
         self._recolor()
+        self.warm_voice()
         self.stage.set_action("idle")
         self.act("show", sfx="show")
         QTimer.singleShot(800, lambda: self.say(self.line("greet"), "happy"))
@@ -908,7 +918,21 @@ class Pet(QWidget):
         m.addAction("角色档案 · 背景故事", self.show_profile)
         m.addSeparator()
         if self.char.backends[0] == "claude_cli":
-            radio(sub(m, "模型（Claude）"), CLAUDE_MODELS, self.s["claude_model"], self.pick_model)
+            mm = sub(m, "模型（Claude Code）")
+            items = list(CLAUDE_MODELS)
+            if self.s["claude_model"] not in dict(items):
+                items.append((self.s["claude_model"], self.s["claude_model"]))
+            radio(mm, items, self.s["claude_model"], lambda k: self.pick_model("claude_model", k))
+            mm.addSeparator()
+            mm.addAction("其他模型（输入完整名称）…", lambda: self.ask_model("claude_model"))
+        elif self.char.backends[0] == "codex_cli":
+            mm = sub(m, "模型（Codex）")
+            items = [("", "跟随 Codex 默认")] + codex_models()
+            if self.s["codex_model"] not in dict(items):
+                items.append((self.s["codex_model"], self.s["codex_model"]))
+            radio(mm, items, self.s["codex_model"], lambda k: self.pick_model("codex_model", k))
+            mm.addSeparator()
+            mm.addAction("其他模型（输入完整名称）…", lambda: self.ask_model("codex_model"))
         radio(sub(m, "切换角色"), [(c.id, f"{c.name}  ·  {c.agent}") for c in CHARACTERS.values()], self.char.id,
               self.set_char)
         am = sub(m, "动作表演")
@@ -957,9 +981,16 @@ class Pet(QWidget):
         m.addAction("退出", self.quit_requested.emit)
         return m
 
-    def pick_model(self, key):
-        self.s["claude_model"] = key
-        self.say(f"好，接下来用 {dict(CLAUDE_MODELS)[key].split(' · ')[0]} 来想事情。", "calm", voice=False)
+    def pick_model(self, setting, key):
+        self.s[setting] = key
+        self.say(f"好，接下来用 {self.model_label()} 来想事情。", "calm", voice=False)
+
+    def ask_model(self, setting):
+        from PySide6.QtWidgets import QInputDialog
+        hint = "例如 claude-opus-5-5、claude-sonnet-5-5" if setting == "claude_model" else "例如 gpt-6.2-sol"
+        text, ok = QInputDialog.getText(None, "选择模型", f"模型的完整名称（{hint}）：", text=self.s[setting] or "")
+        if ok:
+            self.pick_model(setting, text.strip())
 
     def show_profile(self):
         self.profwin.load(self.char, Theme(self.char.color), ASSETS / self.char.id)
@@ -970,6 +1001,7 @@ class Pet(QWidget):
     def pick_voice(self, vid):
         self.s["voice_" + self.char.id] = vid
         self.s["voice_mode"] = "tts"
+        self.warm_voice()
         self.say(self.line("greet"), "happy")
 
     def contextMenuEvent(self, e):

@@ -16,6 +16,7 @@ import re
 import threading
 import wave
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
@@ -44,7 +45,7 @@ def clean(text: str) -> str:
     return re.sub(r"[*_#`>]+", "", t).strip()
 
 
-def plan_flow(text, base_rate, base_pitch, valence=0.0, energy=0.0):
+def plan_flow(text, base_rate, base_pitch, valence=0.0, energy=0.0, limit=48):
     """连贯模式（默认）：整段话交给语音引擎一口气念，停顿和语调由引擎自己根据标点决定。
     v0.2 把每个短句拆开单独合成、各给一个音高，听起来一顿一顿、忽高忽低；这里只在整句边界切，
     并且全程同一个音高，只让语速随心情有很小的变化。短回复就是一次合成。"""
@@ -52,7 +53,8 @@ def plan_flow(text, base_rate, base_pitch, valence=0.0, energy=0.0):
     sents = [s.strip() for s in re.findall(r"[^。！？!?\n]+[。！？!?…~～]*|[。！？!?…]+", t) if s.strip()]
     chunks = []
     for s in sents:
-        if chunks and (len(chunks[-1]) + len(s) <= 48 or len(re.sub(r"\W", "", s)) < 2):
+        if chunks and (len(chunks[-1]) + len(s) <= limit or len(re.sub(r"\W", "", s)) < 2) \
+                and not (limit < 48 and len(chunks) == 1):     # 本地模型：第一句单独合成，开口更快
             chunks[-1] += s
         else:
             chunks.append(s)
@@ -133,8 +135,118 @@ def melo_available() -> bool:
     return (MELO_DIR / "model.onnx").exists()
 
 
+def zipvoice_available() -> bool:
+    return (ZV_DIR / "decoder.onnx").exists() and (DATA / "models" / "vocos_24khz.onnx").exists()
+
+
 def engine_available(eng: str) -> bool:
-    return {"kokoro": kokoro_available, "melo": melo_available}.get(eng, lambda: True)()
+    return {"kokoro": kokoro_available, "melo": melo_available, "zipvoice": zipvoice_available}.get(eng, lambda: True)()
+
+
+# ---------------------------------------------------------------- ZipVoice（参考音色，显卡）
+ZV_DIR = DATA / "models" / "sherpa-onnx-zipvoice-distill-fp32-zh-en-emilia"
+VOICES = DATA / "voices"
+
+
+def find_ffmpeg():
+    import shutil
+    for p in (shutil.which("ffmpeg"), r"D:\ffmpeg\bin\ffmpeg.exe"):
+        if p and Path(p).exists():
+            return p
+    return None
+
+
+def ensure_prompt(char_id, spec):
+    """每个角色的参考音色：data/voices/<角色>/prompt.wav + prompt.txt。
+    你可以换成自己有权使用的录音（5~10 秒，单人、干净），并把录音里说的话原样写进 prompt.txt。
+    没有的话，用微软的合成声线念一段口语化的话当参考（合成声线，不是任何真人的录音）。"""
+    d = VOICES / char_id
+    wav, txt = d / "prompt.wav", d / "prompt.txt"
+    if wav.exists() and txt.exists():
+        return wav, txt.read_text(encoding="utf-8").strip()
+    d.mkdir(parents=True, exist_ok=True)
+    mp3 = d / "prompt_src.mp3"
+    import edge_tts
+
+    async def go():
+        await edge_tts.Communicate(spec["ref_text"], spec["ref_voice"], rate=spec.get("ref_rate", "+0%"),
+                                   pitch=spec.get("ref_pitch", "+0Hz")).save(str(mp3))
+    asyncio.run(go())
+    ff = find_ffmpeg()
+    if not ff:
+        raise RuntimeError("需要 ffmpeg 来生成参考音色")
+    import subprocess
+    subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(mp3), "-ac", "1", "-ar", "24000", str(wav)], check=True,
+                   creationflags=0x08000000)
+    txt.write_text(spec["ref_text"], encoding="utf-8")
+    return wav, spec["ref_text"]
+
+
+class ZipVoiceClient:
+    """管理 tts_worker 子进程。一次只处理一个请求（显卡上排队本来也是串行的）。"""
+
+    def __init__(self):
+        self.proc = None
+        self.lock = threading.Lock()
+        self.provider = ""
+        self.n = 0
+
+    def _start(self):
+        import json
+        import subprocess
+        import sys
+        exe = sys.executable.replace("pythonw.exe", "python.exe")
+        self.proc = subprocess.Popen([exe, "-m", "moepal.tts_worker"], cwd=str(Path(__file__).resolve().parent.parent),
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     text=True, encoding="utf-8", bufsize=1, creationflags=0x08000000)
+        first = json.loads(self.proc.stdout.readline() or "{}")
+        if not first.get("ready"):
+            self.proc.kill()
+            self.proc = None
+            raise RuntimeError(first.get("error", "语音进程启动失败"))
+        self.provider = first.get("provider", "")
+
+    def synth(self, text, prompt_wav, prompt_text, out, speed=1.0, steps=8):
+        import json
+        with self.lock:
+            if self.proc is None or self.proc.poll() is not None:
+                self._start()
+            self.n += 1
+            req = {"id": self.n, "text": text, "prompt_wav": str(prompt_wav), "prompt_text": prompt_text,
+                   "out": str(out), "speed": speed, "steps": steps}
+            self.proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
+            self.proc.stdin.flush()
+            while True:
+                line = self.proc.stdout.readline()
+                if not line:
+                    self.proc = None
+                    raise RuntimeError("语音进程退出了")
+                r = json.loads(line)
+                if r.get("id") == self.n:
+                    if not r.get("ok"):
+                        raise RuntimeError(r.get("error", "合成失败"))
+                    return r
+
+    def warm(self, char_id, spec):
+        """后台预热：启动进程并合成一句很短的话，让第一次开口不用等。"""
+        def go():
+            try:
+                wav, txt = ensure_prompt(char_id, spec)
+                self.synth("嗯。", wav, txt, CACHE / "tts" / "_warm.wav", steps=4)
+            except Exception:
+                pass
+        threading.Thread(target=go, daemon=True).start()
+
+    def close(self):
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.stdin.close()
+                self.proc.wait(2)
+            except Exception:
+                self.proc.kill()
+
+
+ZIPVOICE = ZipVoiceClient()
 
 
 def _write_wav(audio, vol, path):
@@ -222,8 +334,12 @@ class Voice(QObject):
         self.stop()
         self.seq += 1
         n = self.seq
-        planner = plan if self.s["voice_style"] == "expressive" else plan_flow
-        segs = planner(text[:420], voice_spec.get("rate", 0), voice_spec.get("pitch", 0), valence, energy)
+        if voice_spec.get("engine") == "zipvoice":
+            segs = plan_flow(text[:420], 0, 0, valence, energy, limit=30)
+        else:
+            planner = plan if self.s["voice_style"] == "expressive" else plan_flow
+            segs = planner(text[:420], voice_spec.get("rate", 0), voice_spec.get("pitch", 0), valence, energy)
+        self.char_id = voice_spec.get("char", "")
         if not segs:
             QTimer.singleShot(0, lambda: self.failed.emit(n, "空文本"))
             return n
@@ -237,6 +353,21 @@ class Voice(QObject):
     def _synth(self, n, i, seg, spec):
         try:
             eng = spec.get("engine", "edge")
+            if eng == "zipvoice":
+                try:
+                    wav, ptxt = ensure_prompt(spec["char"], spec)
+                    key = hashlib.md5(f"zv|{spec['char']}|{wav.stat().st_mtime}|{seg.rate}|{seg.text}".encode("utf-8")).hexdigest()[:18]
+                    d = CACHE / "tts"
+                    d.mkdir(parents=True, exist_ok=True)
+                    path = d / f"{key}.wav"
+                    if not path.exists() or path.stat().st_size < 400:
+                        speed = float(spec.get("speed", 1.0)) * (1 + seg.rate / 100)
+                        ZIPVOICE.synth(seg.text, wav, ptxt, path, speed=speed, steps=int(spec.get("steps", 8)))
+                    self._ready.emit(n, i, str(path))
+                    return
+                except Exception:
+                    # 显卡语音不可用 → 用同一位参考声线的在线版本顶上，不要哑掉
+                    eng, spec = "edge", dict(spec, voice=spec["ref_voice"])
             key = hashlib.md5(f"{eng}|{spec.get('voice')}|{spec.get('sid')}|{seg.rate}|{seg.pitch}|{seg.vol}|{seg.text}"
                               .encode("utf-8")).hexdigest()[:18]
             d = CACHE / "tts"

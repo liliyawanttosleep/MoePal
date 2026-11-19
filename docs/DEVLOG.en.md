@@ -1,5 +1,23 @@
 ﻿# Dev log (English)
 
+## 2026-11-19 · v0.4 RIFE re-interpolation, GPU voice with reference timbre, any model for both agents
+
+- Measured first: `tools/fps_probe.py` shows 125 repaints/s with zero drops and ~1 ms per paint — rendering is not
+  the bottleneck. The source clips jump at every keyframe (optical-flow interpolation from 8 keyframes was poor).
+- `tools/interp_assets.py` rebuilds every clip from the keyframes: Real-ESRGAN 2x → rife-ncnn-vulkan (rife-v4.6, GPU)
+  to 50 fps with seamless loops; RGB and alpha interpolated separately. Idle: median frame-to-frame change 2.84 → 1.80,
+  loop seam 7.43 → 1.24.
+- The WebP encoder merges identical consecutive frames; per-frame durations are stored in a sidecar `.json` and
+  `Clip.at(ms)` plays by timeline (v0.3 never actually read real durations).
+- `moepal/tts_worker.py`: ZipVoice zero-shot TTS + Vocos in a subprocess, CUDA first. Each character has a reference
+  timbre in `data/voices/<char>/` generated from a Microsoft synthetic voice — no real voice actor recordings were used;
+  users can drop in their own licensed recording. ~1.5–2 s per 4 s sentence on the RTX 5070 Ti after a one-time warm-up.
+- Model menus: Claude Code (default / Haiku / Sonnet / Opus / Fable / any name) and Codex (default / every model in the
+  Codex app's cache / any name).
+
+Not verified: how it sounds (the agent cannot hear), on-screen feel of the new clips, DeepSeek clips interpolated from
+4 very different v1 keyframes, microphone and real mouse gestures.
+
 ## 2026-11-16 · v0.3 real high frame rate, continuous speech, character profiles, Claude model choice
 
 1. **Frame rate** — the user's display is 240 Hz; painting at 60 fps looked choppy. Now renders at
