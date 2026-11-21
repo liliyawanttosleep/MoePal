@@ -65,6 +65,7 @@ class Clip:
         self.scale = 0.86 if (self.h < 400 and self.n > 1) else 1.0   # v1 素材（方形构图）人物偏大，归一身高
         self.blend = self.n > 12 and self.frame_ms <= 60      # v1 的 4 帧素材姿势差太大，不混合
         self.lock = threading.Lock()
+        self.dlock = threading.Lock()
         self.cache = {}
         self.want = 0
         self.wake = threading.Event()
@@ -79,8 +80,9 @@ class Clip:
         self.last = first
 
     def _decode(self, i):
-        self.im.seek(i)
-        rgba = self.im.convert("RGBA")
+        with self.dlock:                   # 后台线程和界面线程可能同时要解码，同一个文件一次只能一个人 seek
+            self.im.seek(i)
+            rgba = self.im.convert("RGBA")
         q = QImage(rgba.tobytes(), rgba.width, rgba.height, rgba.width * 4, QImage.Format.Format_RGBA8888)
         return q.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
 
@@ -128,8 +130,13 @@ class Clip:
         with self.lock:
             a = self.cache.get(i)
             b = self.cache.get((i + 1) % self.n)
-        if a is None:                      # 后台还没解到（刚切动作的头几毫秒）→ 先用上一张
-            return self.last, self.last, 0.0
+        if a is None:                      # 后台还没解到 → 当场解这一张（约 5 毫秒），不要停在上一张
+            try:
+                a = self._decode(i)
+                with self.lock:
+                    self.cache[i] = a
+            except Exception:
+                return self.last, self.last, 0.0
         self.last = a
         if b is None or not self.blend:
             return a, a, 0.0
@@ -394,6 +401,8 @@ ACTIONS = {
     "hide":      ("wave", m_shrink, "💨", "ground", 0.5, "退场"),
     # ---- v0.3 用三视图立绘做的动作 ----
     "turn":      (c_turn, m_turn, "✨", "burst", TURN_STEP * 5, "转身展示"),
+    "turn3d":    ("turn360", m_none, "✨", "burst", 2.4, "转身展示（三维）"),   # 有三维转身序列时 turn 自动换成它
+    "show3d":    ("turn360", m_pop, "@happy", "burst", 1.2, "登场（三维）"),    # 召唤 / 启动时：两倍速转一圈弹出来
     "back":      (c_back, m_breathe, "💭", "pop", 3.0, "背过身去"),
     "profile":   (c_side, m_breathe, None, None, 3.0, "侧身远望"),
     # ---- v0.2 新增的创意动作 ----
@@ -414,6 +423,8 @@ ACTIONS = {
     "moonwalk":  ("hum", m_walk, "🕺", "pop", 2.4, "太空步"),
     "salute":    ("wave", m_yes, "🫡", "pop", 1.8, "收到敬礼"),
 }
+
+ACTION_SPEED = {"show3d": 2.0}     # 素材播放倍速（登场时转身要快）
 
 EMO_ACTION = {"happy": "happy", "love": "love", "shy": "shy", "calm": "talk", "think": "think",
               "curious": "curious", "surprised": "surprised", "worried": "worried", "sad": "sad", "cry": "cry",
@@ -479,7 +490,12 @@ class Stage:
         self.extra_rot = 0.0     # 拖拽时的甩动
         self.rng = random.Random()
         self._burst_done = False
+        self.gt = 0.0            # 全局时钟（不随动作重置）
+        self._last = None        # 上一帧画出来的角色（图像 + 变换），切动作时拿来做交叉淡入
+        self._fade = None
         warm_glyphs(char)
+
+    FADE = 0.22                  # 切换动作时的交叉淡入秒数
 
     def set_char(self, char):
         self.char = char
@@ -487,10 +503,20 @@ class Stage:
         self.particles.clear()
         warm_glyphs(char)
 
+    def resolve(self, name):
+        """有三维转身序列（tools/render_3d.py 生成）时，“转身展示”用真正的三维转身。"""
+        if name in ("turn", "show") and self.bank._path("turn360")[0]:
+            return "turn3d" if name == "turn" else "show3d"
+        return name if name in ACTIONS else "idle"
+
     def set_action(self, name):
-        if name not in ACTIONS:
-            name = "idle"
+        name = self.resolve(name)
         same_clip = ACTIONS[name][0] == ACTIONS[self.action][0] and isinstance(ACTIONS[name][0], str)
+        same_motion = ACTIONS[name][1] is ACTIONS[self.action][1]
+        if self._last is not None and not (same_clip and same_motion):
+            # 冻结刚才那一帧，接下来 0.22 秒里旧画面淡出、新画面淡入，避免“咔”地一下换姿势
+            img, tf = self._last
+            self._fade = (img.copy(), tf, self.gt)
         self.action = name
         self.t = 0.0
         if not same_clip:
@@ -503,8 +529,9 @@ class Stage:
 
     # ---------- 更新 ----------
     def advance(self, dt):
+        self.gt += dt
         self.t += dt
-        self.clip_t += dt
+        self.clip_t += dt * ACTION_SPEED.get(self.action, 1.0)
         _, _, glyph, style, _, _ = ACTIONS[self.action]
         if glyph:
             if glyph.startswith("@"):
@@ -530,10 +557,12 @@ class Stage:
                 return
             self._burst_done = True
             if style == "burst":
-                for _ in range(9):
-                    a = r.uniform(-math.pi, 0)
-                    add(Particle(g, cx + r.uniform(-30, 30), top + 150, math.cos(a) * r.uniform(60, 170),
-                                 math.sin(a) * r.uniform(120, 240), r.uniform(0.9, 1.4), r.uniform(18, 28), "burst"))
+                for i in range(9):                     # 从身体两侧往外、往上飞，不挡脸
+                    side = -1 if i % 2 else 1
+                    a = r.uniform(-math.pi * 0.42, -math.pi * 0.08)
+                    add(Particle(g, cx + side * r.uniform(85, 125), top + r.uniform(150, 230),
+                                 side * math.cos(a) * r.uniform(50, 140), math.sin(a) * r.uniform(130, 230),
+                                 r.uniform(0.9, 1.4), r.uniform(16, 26), "burst"))
             elif style == "pop":
                 add(Particle(g, cx + 78, top + 40, 0, -14, 1.5, 34, "pop"))
             elif style == "ground":
@@ -646,13 +675,20 @@ class Stage:
             p.scale(1, 0.22)
             p.drawEllipse(QPointF(0, 0), 80 * k, 80 * k)
             p.restore()
-        p.save()
-        p.translate(cx + dx, self.FLOOR + dy)
-        p.rotate(rot + self.lean + self.extra_rot)
         s = clip.scale
-        p.scale(sx * s * (-1 if (self.flip != vflip) else 1), sy * s)
-        p.drawImage(QRectF(-clip.w / 2, -clip.foot, clip.w, clip.h), img)
-        p.restore()
+        tf = (cx + dx, self.FLOOR + dy, rot + self.lean + self.extra_rot,
+              sx * s * (-1 if (self.flip != vflip) else 1), sy * s,
+              QRectF(-clip.w / 2, -clip.foot, clip.w, clip.h))
+        k = 1.0
+        if self._fade is not None:
+            k = (self.gt - self._fade[2]) / self.FADE
+            if k >= 1:
+                self._fade, k = None, 1.0
+            else:
+                k = k * k * (3 - 2 * k)
+                self._draw_body(p, self._fade[0], self._fade[1], 1 - k * k)   # 旧画面退得慢一点，中间不发虚
+        self._draw_body(p, img, tf, k)
+        self._last = (img, tf)
         # 粒子
         for q in self.particles:
             k = q.age / q.life
@@ -674,6 +710,17 @@ class Stage:
             d = size * 1.5                       # 缓存图 96px 里字形占 64px
             p.drawImage(QRectF(x - d / 2, y - d / 2, d, d), glyph_image(q.g))
         p.setOpacity(1.0)
+        p.restore()
+
+    @staticmethod
+    def _draw_body(p, img, tf, opacity):
+        x, y, rot, sx, sy, rect = tf
+        p.save()
+        p.setOpacity(opacity)
+        p.translate(x, y)
+        p.rotate(rot)
+        p.scale(sx, sy)
+        p.drawImage(rect, img)
         p.restore()
 
     def body_rect(self, scale=1.0) -> QRectF:

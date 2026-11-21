@@ -100,8 +100,9 @@ def main():
 
     pet.quit_requested.connect(quit_)
     app.aboutToQuit.connect(pet.save_state)
-    from .voice import ZIPVOICE
+    from .voice import COSY, ZIPVOICE
     app.aboutToQuit.connect(ZIPVOICE.close)
+    app.aboutToQuit.connect(COSY.close)
     return app.exec()
 
 

@@ -17,7 +17,8 @@ DEFAULTS = {
     "character": "gpt",
     "scale": 0.72,            # 逻辑像素缩放；150% DPI 下约等于素材原始分辨率
     "voice_mode": "tts",      # tts | babble | mute
-    "voice_style": "flow",    # flow 整段连贯 | expressive 逐句起伏
+    "voice_style": "flow",
+    "sweet": 1,               # 甜度 0 自然 / 1 甜一点 / 2 很甜（参考音色的音高）    # flow 整段连贯 | expressive 逐句起伏
     "max_fps": 120,           # 渲染帧率上限；实际取 min(屏幕刷新率, 这个值)，用电池时减半
     "sfx_volume": 0.3,
     "voice_volume": 0.9,

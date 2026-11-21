@@ -140,7 +140,8 @@ def zipvoice_available() -> bool:
 
 
 def engine_available(eng: str) -> bool:
-    return {"kokoro": kokoro_available, "melo": melo_available, "zipvoice": zipvoice_available}.get(eng, lambda: True)()
+    return {"kokoro": kokoro_available, "melo": melo_available, "zipvoice": zipvoice_available,
+            "cosy": lambda: cosy_available()}.get(eng, lambda: True)()
 
 
 # ---------------------------------------------------------------- ZipVoice（参考音色，显卡）
@@ -156,21 +157,47 @@ def find_ffmpeg():
     return None
 
 
-def ensure_prompt(char_id, spec):
+SWEET_HZ = (0, 14, 28)          # 甜度：参考音色整体抬高的音高（自然 / 甜一点 / 很甜）
+
+# 细分情绪 → 情绪参考音频组（tools/make_emotion_refs.py 用 CosyVoice 按组录好）
+EMO_GROUP = {"happy": "happy", "cheer": "happy", "proud": "happy", "love": "happy", "surprised": "happy",
+             "sad": "sad", "cry": "sad", "angry": "angry",
+             "shy": "soft", "worried": "soft", "sleepy": "soft"}
+
+
+def emotion_prompt(char_id, emo, sweet):
+    """有对应情绪的参考音频就用它（ZipVoice 会连语气一起模仿），没有返回 None。"""
+    grp = EMO_GROUP.get(emo or "calm", "calm")
+    d = VOICES / char_id
+    if (d / "prompt.wav").exists():          # 用户自己放了录音：尊重用户的音色，不换
+        return None
+    wav = d / f"emo_{grp}_s{max(0, min(2, int(sweet)))}.wav"
+    if wav.exists() and wav.with_suffix(".txt").exists():
+        return wav, wav.with_suffix(".txt").read_text(encoding="utf-8").strip()
+    return None
+
+
+def ensure_prompt(char_id, spec, sweet=1):
     """每个角色的参考音色：data/voices/<角色>/prompt.wav + prompt.txt。
     你可以换成自己有权使用的录音（5~10 秒，单人、干净），并把录音里说的话原样写进 prompt.txt。
     没有的话，用微软的合成声线念一段口语化的话当参考（合成声线，不是任何真人的录音）。"""
     d = VOICES / char_id
     wav, txt = d / "prompt.wav", d / "prompt.txt"
+    if wav.exists() and txt.exists():             # 用户自己放的录音优先
+        return wav, txt.read_text(encoding="utf-8").strip()
+    sweet = max(0, min(2, int(sweet)))
+    wav, txt = d / f"prompt_s{sweet}.wav", d / f"prompt_s{sweet}.txt"
     if wav.exists() and txt.exists():
         return wav, txt.read_text(encoding="utf-8").strip()
     d.mkdir(parents=True, exist_ok=True)
-    mp3 = d / "prompt_src.mp3"
+    mp3 = d / f"prompt_s{sweet}.mp3"
+    base = int(str(spec.get("ref_pitch", "+0Hz")).replace("Hz", "") or 0)
+    pitch = f"{base + SWEET_HZ[sweet]:+d}Hz"
     import edge_tts
 
     async def go():
         await edge_tts.Communicate(spec["ref_text"], spec["ref_voice"], rate=spec.get("ref_rate", "+0%"),
-                                   pitch=spec.get("ref_pitch", "+0Hz")).save(str(mp3))
+                                   pitch=pitch).save(str(mp3))
     asyncio.run(go())
     ff = find_ffmpeg()
     if not ff:
@@ -182,10 +209,19 @@ def ensure_prompt(char_id, spec):
     return wav, spec["ref_text"]
 
 
-class ZipVoiceClient:
-    """管理 tts_worker 子进程。一次只处理一个请求（显卡上排队本来也是串行的）。"""
+COSY_PY = Path(__file__).resolve().parent.parent / ".conda-voice" / "python.exe"
+COSY_MODEL = DATA / "models" / "Fun-CosyVoice3-0.5B"
 
-    def __init__(self):
+
+def cosy_available() -> bool:
+    return COSY_PY.exists() and (COSY_MODEL / "llm.pt").exists()
+
+
+class ZipVoiceClient:
+    """管理一个语音子进程（JSON 行协议）。一次只处理一个请求（显卡上排队本来也是串行的）。"""
+
+    def __init__(self, module="moepal.tts_worker", python=None):
+        self.module, self.python = module, python
         self.proc = None
         self.lock = threading.Lock()
         self.provider = ""
@@ -195,8 +231,8 @@ class ZipVoiceClient:
         import json
         import subprocess
         import sys
-        exe = sys.executable.replace("pythonw.exe", "python.exe")
-        self.proc = subprocess.Popen([exe, "-m", "moepal.tts_worker"], cwd=str(Path(__file__).resolve().parent.parent),
+        exe = str(self.python) if self.python else sys.executable.replace("pythonw.exe", "python.exe")
+        self.proc = subprocess.Popen([exe, "-m", self.module], cwd=str(Path(__file__).resolve().parent.parent),
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                      text=True, encoding="utf-8", bufsize=1, creationflags=0x08000000)
         first = json.loads(self.proc.stdout.readline() or "{}")
@@ -206,14 +242,14 @@ class ZipVoiceClient:
             raise RuntimeError(first.get("error", "语音进程启动失败"))
         self.provider = first.get("provider", "")
 
-    def synth(self, text, prompt_wav, prompt_text, out, speed=1.0, steps=8):
+    def synth(self, text, prompt_wav, prompt_text, out, speed=1.0, steps=8, emo="calm"):
         import json
         with self.lock:
             if self.proc is None or self.proc.poll() is not None:
                 self._start()
             self.n += 1
             req = {"id": self.n, "text": text, "prompt_wav": str(prompt_wav), "prompt_text": prompt_text,
-                   "out": str(out), "speed": speed, "steps": steps}
+                   "out": str(out), "speed": speed, "steps": steps, "emo": emo}
             self.proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
             self.proc.stdin.flush()
             while True:
@@ -227,11 +263,11 @@ class ZipVoiceClient:
                         raise RuntimeError(r.get("error", "合成失败"))
                     return r
 
-    def warm(self, char_id, spec):
+    def warm(self, char_id, spec, sweet=1):
         """后台预热：启动进程并合成一句很短的话，让第一次开口不用等。"""
         def go():
             try:
-                wav, txt = ensure_prompt(char_id, spec)
+                wav, txt = ensure_prompt(char_id, spec, sweet)
                 self.synth("嗯。", wav, txt, CACHE / "tts" / "_warm.wav", steps=4)
             except Exception:
                 pass
@@ -247,6 +283,7 @@ class ZipVoiceClient:
 
 
 ZIPVOICE = ZipVoiceClient()
+COSY = ZipVoiceClient("moepal.cosy_worker", COSY_PY)
 
 
 def _write_wav(audio, vol, path):
@@ -330,12 +367,13 @@ class Voice(QObject):
         self._announced = False
         self.playing = False
 
-    def speak(self, voice_spec, text, valence=0.0, energy=0.0) -> int:
+    def speak(self, voice_spec, text, valence=0.0, energy=0.0, emo="calm") -> int:
         self.stop()
         self.seq += 1
         n = self.seq
-        if voice_spec.get("engine") == "zipvoice":
-            segs = plan_flow(text[:420], 0, 0, valence, energy, limit=30)
+        self.emo = emo or "calm"
+        if voice_spec.get("engine") in ("zipvoice", "cosy"):
+            segs = plan_flow(text[:420], 0, 0, valence, energy, limit=40 if voice_spec["engine"] == "cosy" else 30)
         else:
             planner = plan if self.s["voice_style"] == "expressive" else plan_flow
             segs = planner(text[:420], voice_spec.get("rate", 0), voice_spec.get("pitch", 0), valence, energy)
@@ -353,10 +391,25 @@ class Voice(QObject):
     def _synth(self, n, i, seg, spec):
         try:
             eng = spec.get("engine", "edge")
+            sweet = int(self.s["sweet"] if self.s["sweet"] is not None else 1)
+            if eng == "cosy":
+                try:
+                    wav, ptxt = ensure_prompt(spec["char"], spec, sweet)
+                    key = hashlib.md5(f"cosy|{wav}|{wav.stat().st_mtime}|{self.emo}|{seg.rate}|{seg.text}".encode("utf-8")).hexdigest()[:18]
+                    d = CACHE / "tts"
+                    d.mkdir(parents=True, exist_ok=True)
+                    path = d / f"{key}.wav"
+                    if not path.exists() or path.stat().st_size < 400:
+                        speed = float(spec.get("speed", 1.0)) * (1 + seg.rate / 100)
+                        COSY.synth(seg.text, wav, ptxt, path, speed=speed, emo=self.emo)
+                    self._ready.emit(n, i, str(path))
+                    return
+                except Exception:
+                    eng = "zipvoice"                # CosyVoice 不可用 → 退到 ZipVoice
             if eng == "zipvoice":
                 try:
-                    wav, ptxt = ensure_prompt(spec["char"], spec)
-                    key = hashlib.md5(f"zv|{spec['char']}|{wav.stat().st_mtime}|{seg.rate}|{seg.text}".encode("utf-8")).hexdigest()[:18]
+                    wav, ptxt = emotion_prompt(spec["char"], self.emo, sweet) or ensure_prompt(spec["char"], spec, sweet)
+                    key = hashlib.md5(f"zv|{wav}|{wav.stat().st_mtime}|{seg.rate}|{seg.text}".encode("utf-8")).hexdigest()[:18]
                     d = CACHE / "tts"
                     d.mkdir(parents=True, exist_ok=True)
                     path = d / f"{key}.wav"

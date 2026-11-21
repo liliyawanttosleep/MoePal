@@ -22,9 +22,13 @@ D:\MoePal\.venv\Scripts\pythonw.exe D:\MoePal\MoePal.pyw      # 或双击桌面�
 .venv\Scripts\python tools\make_views.py                       # 从三视图抠出正/侧/背立绘（角色档案、转身动作用）
 .venv\Scripts\python tools\interp_assets.py [--only gpt] [--clip idle]   # 关键帧 → 2x → RIFE 50fps（需 data/tools/rife-ncnn-vulkan-*）
 .venv\Scripts\python tools\fps_probe.py [秒] [动作...]         # 真实窗口上量重绘帧率（静音，会弹出几秒）
+.conda-3d\python tools\make_3d.py [角色...]                     # 三视图 → 三维网格（Hunyuan3D-2mv，data/3d/<角色>/shape.glb）
+.conda-3d\python tools\render_3d.py [角色...]                   # 网格 + 原画投影 → assets/<角色>/turn360@2x.webp
+.venv\Scripts\python tools\make_emotion_refs.py               # 用 CosyVoice 录每位角色的情绪参考音频（聊天语音用）
+.venv\Scripts\python tools\make_pv.py <角色> [--preview 秒]      # 生成 5 分钟角色 PV（data/pv/<角色>/）
 ```
 
-环境：Python 3.13 独立 venv（`.venv`，不动 Anaconda）；依赖见 `requirements.txt`（`torch` 只有超分脚本用，装 CPU 版即可）。
+环境：Python 3.13 独立 venv（`.venv`，不动 Anaconda）；另有两个独立 conda 环境（不是 base）：`.conda-voice`（CosyVoice，Python 3.10 + torch cu128）、`.conda-3d`（Hunyuan3D，Python 3.10 + torch cu128，transformers 4.48.x）。代码在 `data/tools/CosyVoice`、`data/tools/Hunyuan3D-2`（官方仓库克隆）。本机连不上 Hugging Face，模型从 ModelScope 下载（`data/tools/fetch_models.py` 带断线重试）。依赖见 `requirements.txt`（`torch` 只有超分脚本用，装 CPU 版即可）。
 开发时注意：用户可能正在全屏玩游戏，**不要随手跑 `ui_test.py`**（会弹窗、出声、抢焦点）；用 `render_ui.py` 和 `smoke_test.py`。
 
 ## 结构 / Layout
@@ -36,7 +40,9 @@ D:\MoePal\.venv\Scripts\pythonw.exe D:\MoePal\MoePal.pyw      # 或双击桌面�
 | `moepal/sfx.py` | numpy 合成的角色音频轨道：19 个事件音 + 晕眩 + 呼噜 + 8 个咿呀语音节，三种音色族 crystal / musicbox / bubble |
 | `moepal/audio.py` | `Audio`：音效播放、跟随默认输出设备；`Listener`：麦克风录音 + faster-whisper 本地识别 |
 | `moepal/voice.py` | 说话：拆句、并行合成、顺序播放；引擎 zipvoice（默认，参考音色，显卡子进程）/ edge（在线）/ melo、kokoro（本地 CPU）；`ensure_prompt` 生成参考音色 |
-| `moepal/tts_worker.py` | ZipVoice 语音子进程（stdin/stdout JSON 行协议），CUDA 优先 |
+| `moepal/tts_worker.py` | ZipVoice 语音子进程（stdin/stdout JSON 行协议），CUDA 优先；聊天默认，按情绪挑参考音频（`voice.emotion_prompt`） |
+| `moepal/cosy_worker.py` | CosyVoice3 语音子进程（在 `.conda-voice` 里运行），按情绪换语气；用于录情绪参考、PV 配音和「CosyVoice 原声」声线 |
+| `tools/pv_scripts.py` / `tools/make_pv.py` | 角色 PV 的分镜台词与合成器 |
 | `moepal/brain.py` | 模型后端 `claude_cli` / `codex_cli` / `deepseek_api`，按角色优先级依次尝试并自动降级；prompt 组装；回复解析；本地关键词情绪 |
 | `moepal/deskctx.py` | 前台窗口、空闲时间、CPU、电量、应用分类、给模型看的桌面状态描述 |
 | `moepal/pet.py` | 桌宠窗口：状态机、情绪（愉悦 v / 精力 e / 好感 a）、鼠标互动、桌面反应、说话流程、对话流程、菜单 |
@@ -48,6 +54,7 @@ D:\MoePal\.venv\Scripts\pythonw.exe D:\MoePal\MoePal.pyw      # 或双击桌面�
 
 ## 关键设计 / Key decisions
 
+- **三维只做转身和登场**：`turn360` 由三维模型渲染、颜色来自原画投影；其余动作仍是二维序列帧。换动作统一 0.22 秒交叉淡入。
 - **组合动作** = 序列帧 clip × 程序化运动 motion × 粒子 emit。没有图像生成工具时也能扩充动作；新增一个动作只需在 `ACTIONS` 里加一行。
 - **一角色一 Agent**：白龙娘只走 Codex CLI（Codex 桌面应用自带的那个），Claude 大小姐只走 Claude Code CLI，互不降级；两者都可在菜单里选任意模型。
 - **参考音色不用真人配音演员的录音**：默认参考由微软合成声线生成；用户可放入自己有权使用的录音。

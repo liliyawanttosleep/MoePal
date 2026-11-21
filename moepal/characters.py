@@ -28,9 +28,15 @@ def V(label, voice, rate=0, pitch=0):
 
 def Z(char, ref_voice, ref_text, ref_rate="+0%", ref_pitch="+0Hz", speed=1.0):
     """自然对话声线：ZipVoice 参考音色克隆（本地显卡）。参考音色见 voice.ensure_prompt。"""
-    return {"id": f"zv-{char}", "label": "自然对话 · 本地显卡（推荐）", "engine": "zipvoice", "char": char,
+    return {"id": f"zv-{char}", "label": "自然有情绪 · 快速（推荐）", "engine": "zipvoice", "char": char,
             "ref_voice": ref_voice, "ref_text": ref_text, "ref_rate": ref_rate, "ref_pitch": ref_pitch,
             "speed": speed, "steps": 8, "rate": 0, "pitch": 0}
+
+
+def C(char, ref_voice, ref_text, ref_rate="+0%", ref_pitch="+0Hz", speed=1.0):
+    """自然有情绪：Fun-CosyVoice3（本地显卡）——学参考音色，并按每句话的情绪换语气（开心/难过/生气/轻声）。"""
+    return dict(Z(char, ref_voice, ref_text, ref_rate, ref_pitch, speed), id=f"cosy-{char}", engine="cosy",
+                label="CosyVoice 原声 · 最细腻，但每句要等几秒")
 
 
 MELO = [{"id": "melo-zh", "label": "本地 · 自然女声（MeloTTS，离线）", "engine": "melo", "rate": 0, "pitch": 0}]
@@ -63,7 +69,8 @@ GPT = Character(
     persona="""你叫“小白”，是一只白色小龙娘：白色长发、紫色眼睛、一对龙角、小龙翼和白色龙尾，穿白金色的古风长裙，身边偶尔飘着一团蓝色小龙焰。
 性格：元气、机灵、好奇心很重，有一点小骄傲（毕竟是龙），被夸会尾巴乱甩，被冷落会嘟嘴。自称“本龙”或“小白”，偶尔句尾带“嗷”“哼哼”。
 对用户的称呼：“主人”或直接说“你”。""",
-    voices=[Z("gpt", "zh-CN-XiaoyiNeural", "嘿嘿，本龙来啦！今天想做什么呀？快告诉我嘛，我陪你一起！", "+6%", "+0Hz", 1.05),
+    voices=[Z("gpt", "zh-CN-XiaoyiNeural", "嘿嘿，本龙来啦！今天想做什么呀？快告诉我嘛，我陪你一起！", "+6%", "+0Hz", 0.9),
+            C("gpt", "zh-CN-XiaoyiNeural", "嘿嘿，本龙来啦！今天想做什么呀？快告诉我嘛，我陪你一起！", "+6%", "+0Hz", 0.9),
             V("活泼少女 · 晓伊", "zh-CN-XiaoyiNeural", 0, 0), V("俏皮 · 晓北", "zh-CN-liaoning-XiaobeiNeural", 0, 0),
             V("清亮 · 曉雨", "zh-TW-HsiaoYuNeural", 0, 0), V("温暖 · 晓晓", "zh-CN-XiaoxiaoNeural", 3, 0)] + KOKORO,
     agent="Codex",
@@ -104,6 +111,10 @@ GPT = Character(
         "no_hear": ["唔，没听清，再说一次？"],
         "thinking": ["让本龙想想……", "唔……"],
         "error": ["呜，脑袋连不上线了……等一下再试试？"],
+        "muse_happy": ['今天的云像棉花糖……想咬一口。', '嘿嘿，尾巴自己在甩，停不下来。', '阿问今天烧得好旺！', '本龙心情好，想喷个小火花。'],
+        "muse_calm": ['这个问题好像在哪儿见过……', '要是能把天空装进藏书阁就好了。', '主人在专心，本龙不吵。', '数到一百就去偷看一下屏幕。'],
+        "muse_low": ['今天是不是没人想问我问题……', '角好重，想趴一会儿。', '……被冷落的龙也是会难过的。'],
+        "muse_night": ['月亮今天弯弯的，像龙角。', '这么晚了，主人还不困吗……', '本龙才没有困……呼……'],
     },
 )
 
@@ -112,7 +123,8 @@ CLAUDE = Character(
     persona="""你是“Claude 大小姐”：橙色长卷发、琥珀色眼睛，发间别着一朵橙色大花和黑色缎带，穿米白、黑、橙三色的洋装，手里常抱着一本书。
 性格：温柔、沉稳、有教养，爱读书，观察细致；说话优雅但不端着，偶尔会小小地毒舌或害羞，是个可靠的姐姐型伙伴。偶尔用“呢”“哦”，自称“我”。
 对用户的称呼：“你”。""",
-    voices=[Z("claude", "zh-CN-XiaoxiaoNeural", "嗯，我在呢。别着急，我们一件一件来，好吗？先说说你现在卡在哪里。", "-4%", "+0Hz", 0.97),
+    voices=[Z("claude", "zh-CN-XiaoxiaoNeural", "嗯，我在呢。别着急，我们一件一件来，好吗？先说说你现在卡在哪里。", "-4%", "+0Hz", 0.85),
+            C("claude", "zh-CN-XiaoxiaoNeural", "嗯，我在呢。别着急，我们一件一件来，好吗？先说说你现在卡在哪里。", "-4%", "+0Hz", 0.85),
             V("温柔知性 · 晓晓", "zh-CN-XiaoxiaoNeural", -3, 0), V("轻柔 · 曉臻", "zh-TW-HsiaoChenNeural", 0, 0),
             V("清亮 · 曉雨", "zh-TW-HsiaoYuNeural", -2, 0), V("少女 · 晓伊", "zh-CN-XiaoyiNeural", -4, 0)] + KOKORO,
     agent="Claude Code",
@@ -153,6 +165,10 @@ CLAUDE = Character(
         "no_hear": ["抱歉，没有听清，可以再说一遍吗？"],
         "thinking": ["让我想一想……", "嗯……"],
         "error": ["抱歉，我这边暂时连不上……稍后再试一次好吗？"],
+        "muse_happy": ['这一页写得真好，想念给你听。', '茶刚刚好的温度。', '嗯，今天的进度比预想快。'],
+        "muse_calm": ['书里说，慢一点也是一种快。', '这个结尾……作者是故意的吧。', '窗外好像起风了。', '等你忙完，我有一个小故事。'],
+        "muse_low": ['……书里的人都比我坦率。', '茶凉了，也懒得再泡。', '有点想念家里的座钟。'],
+        "muse_night": ['夜里读书，字会变得很安静。', '再读一章就睡……大概。', '他今天也辛苦了。'],
     },
 )
 
@@ -161,7 +177,8 @@ DEEPSEEK = Character(
     persona="""你叫“小鲸”，是一只蓝色的鲸鱼娘：蓝色长卷发、蓝眼睛、头上有呆毛和鱼鳍耳，穿深蓝女仆装，围裙上印着小鲸鱼，身后有一条鲸鱼尾巴。被大家叫作“蓝色大肥鱼”，听到会小小抗议。
 性格：软萌、勤快、有点天然呆，容易紧张，做事认真，喜欢被夸。说话软软的，偶尔带“呜”“噗噜”，自称“小鲸”。
 对用户的称呼：“主人”。""",
-    voices=[Z("deepseek", "zh-CN-XiaoyiNeural", "主人～小鲸来啦！今天要做什么呀？小鲸马上就好，等我一下下！", "-2%", "+18Hz", 1.0),
+    voices=[Z("deepseek", "zh-CN-XiaoyiNeural", "主人～小鲸来啦！今天要做什么呀？小鲸马上就好，等我一下下！", "-2%", "+18Hz", 0.88),
+            C("deepseek", "zh-CN-XiaoyiNeural", "主人～小鲸来啦！今天要做什么呀？小鲸马上就好，等我一下下！", "-2%", "+18Hz", 0.88),
             V("软萌 · 晓伊", "zh-CN-XiaoyiNeural", -2, 4), V("清亮 · 曉雨", "zh-TW-HsiaoYuNeural", 0, 3)] + KOKORO,
     agent="DeepSeek（未接入，暂由 Claude 代答）",
     tagline="从深海浮上来学做女仆的小鲸，唱歌跑调但做事认真",
@@ -197,6 +214,10 @@ DEEPSEEK = Character(
         "listen": ["嗯嗯，小鲸在听。"], "no_hear": ["呜，没听清……"],
         "thinking": ["小鲸想想……", "噗噜噗噜……"],
         "error": ["呜……小鲸的脑袋连不上网了……"],
+        "muse_happy": ['噗噜噗噜，冒泡泡～', '今天擦了三遍桌子，好干净！', '被夸了，嘿嘿，记在小本本上。'],
+        "muse_calm": ['深海里现在是不是也很安静……', '清单第三项……做完了吗？', '围裙上的小鲸鱼在对我笑。'],
+        "muse_low": ['才、才不是大肥鱼……', '又搞砸了一点点……下次一定。', '有点想奶奶的热汤了。'],
+        "muse_night": ['好黑……像回到海底了。', '主人睡觉前要喝杯温水哦……', '呼噜……小鲸没睡……'],
     },
 )
 

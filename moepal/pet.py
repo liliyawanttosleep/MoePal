@@ -161,10 +161,10 @@ class Pet(QWidget):
 
     def warm_voice(self):
         """用自然对话声线时，后台先把语音进程和参考音色准备好，第一次开口不用等。"""
-        from .voice import ZIPVOICE
+        from .voice import COSY, ZIPVOICE
         v = self.voice_spec()
-        if v["engine"] == "zipvoice" and self.s["voice_mode"] == "tts":
-            ZIPVOICE.warm(self.char.id, v)
+        if self.s["voice_mode"] == "tts" and v["engine"] in ("zipvoice", "cosy"):
+            (COSY if v["engine"] == "cosy" else ZIPVOICE).warm(self.char.id, v, self.s["sweet"])
 
     def _place_initial(self):
         area = QApplication.primaryScreen().availableGeometry()
@@ -244,8 +244,7 @@ class Pet(QWidget):
 
     def act(self, name, dur=None, sfx=None, vol=1.0):
         """播放一次性动作，结束后回到基础状态。"""
-        if name not in ACTIONS:
-            name = "idle"
+        name = self.stage.resolve(name)
         d = dur or ACTIONS[name][4] or 2.0
         self.stage.set_action(name)
         self.oneshot_end = time.time() + d
@@ -297,6 +296,10 @@ class Pet(QWidget):
                 if self.desk.cat in ("code", "study") and self.desk.idle < 30:
                     pool += ["study", "focus", "study"]
                 self.act(self.rng.choice(pool))
+                # 偶尔自言自语一句心里话（只显示，不出声，不打扰），内容随心情和时间变
+                if (self.s["proactive"] and not self.inputbar.isVisible() and not self.desk.full
+                        and self.rng.random() < 0.35 and self.cooled("muse", 150)):
+                    QTimer.singleShot(900, self.muse)
             elif (self.s["stroll"] and now >= self.next_stroll and not self.inputbar.isVisible()
                   and not self.hover and self.desk.idle < 120):
                 self.next_stroll = now + self.rng.uniform(90, 240)
@@ -516,7 +519,7 @@ class Pet(QWidget):
         if voice and mode == "tts":
             self.tts_done = False
             self.type_target = 0               # 字跟着声音走：哪一句开始念，哪一句才出字
-            self.tts_req = self.voice.speak(self.voice_spec(), text, self.mood["v"], self.mood["e"])
+            self.tts_req = self.voice.speak(self.voice_spec(), text, self.mood["v"], self.mood["e"], emo=emo_key)
             self.type_timer.start(60)
             sid = self.say_id
             QTimer.singleShot(8000, lambda: self._tts_timeout(sid))
@@ -746,6 +749,18 @@ class Pet(QWidget):
             self.say(self.line("no_hear"), "curious", voice=False)
 
     # ------------------------------------------------------------ 出现 / 躲起来 / 睡觉
+    def muse(self):
+        if self.speaking or self.busy or self.mode != "normal":
+            return
+        h = datetime.now().hour
+        v = self.mood["v"]
+        key = "muse_night" if (h >= 23 or h < 5) else "muse_low" if v < -0.25 else "muse_happy" if v > 0.4 else "muse_calm"
+        text = self.line(key)
+        if text:
+            emo = {"muse_low": "sad", "muse_happy": "happy", "muse_night": "sleepy"}.get(key, "calm")
+            self.say(f"（{text}）", emo, action=self.stage.action, voice=False, sfx="think" if emo == "calm" else None,
+                     hold=3.2)
+
     def first_hello(self):
         self.desk.poll()
         if self.desk.full:                 # 启动时用户正全屏（游戏等）→ 先不露面，等退出全屏再打招呼
@@ -951,6 +966,8 @@ class Pet(QWidget):
         radio(vm, (("tts", "开口说话"), ("babble", "咿呀语（离线）"), ("mute", "静音")), self.s["voice_mode"],
               lambda k: self.s.__setitem__("voice_mode", k))
         vm.addSeparator()
+        radio(vm, ((0, "甜度：自然"), (1, "甜度：甜一点"), (2, "甜度：很甜")), self.s["sweet"], self.pick_sweet)
+        vm.addSeparator()
         radio(vm, (("flow", "说话方式：连贯自然"), ("expressive", "说话方式：逐句起伏")), self.s["voice_style"],
               lambda k: self.s.__setitem__("voice_style", k))
         a = QAction("提示音（铃声 / 水泡等）", vm, checkable=True, checked=float(self.s["sfx_volume"]) > 0)
@@ -997,6 +1014,11 @@ class Pet(QWidget):
         self.profwin.show()
         self.profwin.raise_()
         self.act("turn")
+
+    def pick_sweet(self, level):
+        self.s["sweet"] = int(level)
+        self.warm_voice()
+        self.say(self.line("greet"), "happy")
 
     def pick_voice(self, vid):
         self.s["voice_" + self.char.id] = vid

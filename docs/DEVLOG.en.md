@@ -1,5 +1,26 @@
 ﻿# Dev log (English)
 
+## 2026-11-21 · v0.5 3D turnaround, emotional voice, character PVs
+
+- **3D**: `tools/make_3d.py` (env `.conda-3d`, torch 2.7.1 cu128) builds a mesh per character with Hunyuan3D-2mv from the
+  front/side/back views (shadows stripped first). Weights come from ModelScope (Hugging Face is unreachable here);
+  transformers must be 4.48.x. `tools/render_3d.py` (moderngl) colours the mesh by projecting the original art from four
+  directions with depth-tested visibility and a sharp facing-based blend (no AI texture → same style as the 2D art),
+  adds a thin outline, aligns to the idle sprite and writes `turn360@2x.webp` (120 frames). The pet uses it for the
+  turnaround and for a fast 3D spin when appearing / being summoned.
+- **Smoother actions**: 0.22 s crossfade on every action change; particle bursts no longer cover the face.
+- **Voice**: `moepal/cosy_worker.py` runs Fun-CosyVoice3 (Apache-2.0) with emotion instructions — measured clear pitch/
+  tempo differences per emotion — but its LLM is ~1.7x slower than real time on Windows. For chat,
+  `tools/make_emotion_refs.py` records 45 per-character/per-emotion/per-sweetness reference clips with CosyVoice, and
+  ZipVoice (~0.35x real time) picks the matching one per sentence, inheriting the mood. Sweetness menu (0/14/28 Hz),
+  slower default rate.
+- **Muse**: occasional silent inner-thought bubbles depending on mood and time.
+- **PVs**: `tools/pv_scripts.py` + `tools/make_pv.py` produce a ~5-minute 1080p PV per character: CosyVoice narration,
+  auto-timed timeline, synthesized BGM with ducking, Qt-rendered frames reusing the pet renderer, libx264 (NVENC fails
+  in this ffmpeg build). No new hand-drawn frames.
+
+Not verified: how the voices sound (the agent cannot hear); overall PV feel; the 3D summon animation in a real window.
+
 ## 2026-11-19 · v0.4 RIFE re-interpolation, GPU voice with reference timbre, any model for both agents
 
 - Measured first: `tools/fps_probe.py` shows 125 repaints/s with zero drops and ~1 ms per paint — rendering is not
