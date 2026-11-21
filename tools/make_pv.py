@@ -508,9 +508,9 @@ class Painter:
         elif kind == "story":
             dur = seg["t1"] - seg["t0"]
             z = 1.0 + 0.10 * lt / dur
-            ih = 900 * z
+            ih = 800 * z
             iw = ih * self.illust.width() / self.illust.height()
-            frame = QRectF(W * 0.56, 90, 640, 900)
+            frame = QRectF(W * 0.58, 70, 560, 800)          # 下沿留给字幕
             a = fade_in_out(t, seg["t0"] + CARD * 0.6, seg["t1"], 1.0, 0.8)
             p.save()
             p.setOpacity(a)

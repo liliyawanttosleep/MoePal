@@ -19,6 +19,9 @@
   auto-timed timeline, synthesized BGM with ducking, Qt-rendered frames reusing the pet renderer, libx264 (NVENC fails
   in this ffmpeg build). No new hand-drawn frames.
 
+Verified: all three PVs rendered and spot-checked per section (300.0 s, 1920x1080, 30 fps, AAC stereo, in the Desktop
+asset folder `角色PV\`); 3D summon spin checked offscreen. A frame the background decoder has not produced yet is now
+decoded on the spot (with a lock) instead of repeating the last one.
 Not verified: how the voices sound (the agent cannot hear); overall PV feel; the 3D summon animation in a real window.
 
 ## 2026-11-19 · v0.4 RIFE re-interpolation, GPU voice with reference timbre, any model for both agents
